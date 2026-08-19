@@ -1,10 +1,37 @@
 # wkt — design
 
-**Status:** design, not implemented. Written 2026-08-19.
+**Status:** design, not implemented. Written 2026-08-19, revised the same day
+after two adversarial review passes.
 **Working name:** `wkt`. Public name TBD (`wt` is taken by worktrunk).
+**Environment under test:** macOS Darwin 25.6.0 / APFS, git 2.50.1,
+Claude Code 2.1.220 (current release at the time of writing: 2.1.235).
 
 One task, one branch, many repositories — materialised as a mirrored slice of a
 multi-repo workspace, with a base that is coherent across the set.
+
+---
+
+## 0. Threat model
+
+The document does security engineering in §5.6, so it must say who the adversary
+is. There isn't one. The perimeter exists to prevent **accidents**:
+
+**In scope (accidents we prevent):**
+- an agent edits a repository that is not part of its task;
+- an agent commits to the wrong branch, or to a main checkout;
+- an agent working on task A modifies task B's tree;
+- a teardown deletes work the user did not know was there.
+
+**Out of scope (we do not defend against):**
+- a prompt-injected or hostile agent deliberately escaping. Every mechanism we
+  use is defeatable — §5.6 lists how;
+- exfiltration. The tree can read the workspace and reach the network;
+- anything remote-side. A task can push to the real origin; branch protection on
+  the forge is the only control there;
+- a hostile repository (malicious hooks, `.gitattributes` filters).
+
+Everything §5.6 does is defence in depth against mistakes, and the README must
+say so in the first paragraph.
 
 ---
 
@@ -29,25 +56,24 @@ services plus docs, and the set has to stay consistent: one branch name, one
 coherent base, one merge request per repository.
 
 `wkt` gives each task its own tree where every participating repository is a real
-worktree on the task branch, laid out **in the same shape as the workspace**, with
-the rest of the workspace present read-only so an agent can read what it must not
-change.
+worktree on the task branch, laid out **in the same shape as the workspace**,
+with the rest of the workspace reachable read-only.
 
 ### 1.1 What it does not promise
 
 State these in the README or users will assume them:
 
-- **Not a security boundary.** The perimeter stops accidents, not a
-  prompt-injected agent. Section 6 says exactly where it holds and where it does
-  not — this was measured, not guessed.
-- **No conflict prevention.** Two tasks editing the same file still conflict; the
+- **Not a security boundary.** See §0 and §5.6.
+- **No conflict prevention.** Two tasks editing one file still conflict; the
   conflict moves from `git status` to the eventual rebase.
-- **No cross-repo atomic merge.** GitHub has no primitive for it, Gerrit topics
-  are explicitly non-atomic, GitLab merge trains are per-project. Nobody has
-  solved this; we will not pretend to.
-- **No runtime environment.** Ports, docker-compose project names, databases and
-  dependency installation are out of scope. There is a documented seam
-  (`post-create` hook, gitignored-file carry) and nothing more.
+- **No cross-repo atomic merge.** GitHub has no primitive, Gerrit topics are
+  explicitly non-atomic, GitLab merge trains are per-project.
+- **No runtime environment.** Ports, compose project names, databases and
+  dependency installation are out of scope. There is a `post-create` seam and a
+  gitignored-file carry, and nothing else. (No shared cache directory in v0 —
+  see §5.1.)
+- **Not a remote-side boundary.** A task tree can push to the repository's real
+  origin.
 - **No Windows in v0.** The blocker is symlinks-plus-perimeter, not packaging.
 - **Not a service multiplier.** One task owns the local stack at a time.
 
@@ -55,97 +81,126 @@ State these in the README or users will assume them:
 
 ## 2. Prior art
 
-Surveyed 2026-08-19 via web research and source reading. **Star counts and tool
-names below come from automated research; verify any figure before quoting it
-publicly.** Different research passes named different "category leaders", which
-is itself a signal that the top of this market is unsettled.
+Surveyed 2026-08-19. Figures below were verified with `gh api` on that date;
+each is stamped. Anything that could not be verified has been removed rather
+than hedged.
 
-### 2.1 Single-repo worktree managers for agents — saturated
+### 2.1 Single-repo worktree tooling — commoditised
 
-`worktrunk` (`wt`, Rust, ~6.5k★) is the best-engineered pure CLI and hard-fails
-outside a git repository (issue #3369) — which is exactly our workspace root.
-Others in the same band: `claude-squad`, `gastown`, `vibe-kanban` (sunsetting),
-`crystal` (deprecated → closed-source Nimbalyst), `uzi` (stale), `catnip` (gone).
-Anthropic commoditised this layer with `claude --worktree` in Feb 2026.
+`max-sixty/worktrunk` (`wt`) — **6,545★, Rust, pushed 2026-08-19** — is the
+most-starred pure worktree CLI and the only one in the set with a documented JSON
+automation contract. Its worktree commands require a repository context;
+`wt -C <repo>` supplies it explicitly. A request to relax that
+(issue #3369, *"Feature request: Allow running wt commands outside of a git
+repository"*) was **closed unimplemented**.
 
-**Conclusion: no differentiation left on the single-repo axis.**
+The wider agent-session layer is much larger than the CLI: `BloopAI/vibe-kanban`
+**27,849★** (last push 2026-04-24, sunsetting), `smtg-ai/claude-squad`
+**8,342★**, `dagger/container-use` **4,014★**, `stravu/crystal` **3,108★**
+(superseded 2026-02 by Nimbalyst, which is **not** closed source — it is a
+public MIT repository), `imbue-ai/sculptor` **218★**.
 
-### 2.2 Multi-repo worktree tools — attempted ~12 times, no traction
+Anthropic shipped `claude --worktree` natively. **No differentiation is left on
+the single-repo axis.**
 
-| Tool | Discovery on create | Layout | Removal safety |
-|---|---|---|---|
-| `nicksenap/grove` (~78★, Go) | depth 1 | flat, collides on basename | refuses dirty, `--force` destroys |
-| `spawnpoint` (~9★, Python) | depth 2 | flat | **destructive by design**: auto `--force`, `rmtree` fallback, `branch -d`→`-D` |
-| `etz`, `orbit`, `wsp`, `aw`, `devslot`, `trek`, `mwt`, `WorkForests`, `nanasess/gwm` | manifest or depth 1–2 (one does depth 8) | flat | dirty-check at best |
+### 2.2 Multi-repo worktree tools — many attempts, no traction
 
-Nobody preserves the workspace's tree shape. Nobody handles non-git workspace
-content (one exception at 2★). Nobody checks unpushed commits before removal
-(one exception at 0★). Nobody confines the agent.
+| Tool | Verified | Discovery on create | Layout | Removal safety |
+|---|---|---|---|---|
+| `nicksenap/grove` (`gw`) | **78★**, Go, MIT, pushed 2026-08-14 | depth 1 (`os.ReadDir`) | flat, collides on basename | refuses dirty, `--force` destroys |
+| `mihirgupta0900/spawnpoint` | **9★**, Python, MIT, pushed 2026-08-10 | depth 2, hardcoded | flat | **destructive by design**: auto `--force`, `rmtree` fallback, `branch -d`→`-D` |
+| `nanasess/git-worktree-manager` | **2★**, Shell, pushed 2026-07-27 | immediate children | `<project>.worktrees/<task>/<repo>` | refuses dirty; the only tool found that symlinks non-git workspace content |
+| `etz-dev/etz`, `orbcli/orbit`, `jganoff/wsp`, `lldxflwb/aw`, `yammerjp/devslot`, `marsvogel/WorkForests` and others | 0–15★ | manifest, or depth 1–2 (one does depth 8) | flat | dirty-check at best |
 
-**The ceiling of this entire category is ~78 stars.** Read that in both
-directions: the winner slot may be open, or two dozen people discovered the
-audience is smaller than it feels from inside.
+`gastownhall/gastown` (**17,668★**) is the large exception and belongs in this
+section, not §2.1: a "town" holds many "rigs", each wrapping one repository, and
+agent workspaces are worktrees. But it **owns the layout** — rigs are added by
+cloning into its own tree — rather than adopting an existing directory, and
+nested repositories inside a town are a known unresolved problem in its tracker.
+
+**What the table shows.** Among tools that adopt an existing directory of
+repositories, the largest is 78★. That is a narrow category and the boundary is
+doing real work, so it is not evidence that the ceiling for *this idea* is 78
+stars — `gastown` is a counterexample at 17.7k for the adjacent, layout-owning
+shape. What holds unconditionally: no tool in the table preserves the workspace's
+tree shape, none handles the workspace's non-git content except the 2★ one, and
+none checks unpushed commits before removal.
 
 ### 2.3 Adjacent
 
-`jj` (`jj workspace`) is multiple working copies of **one** repo. Sapling: same.
-Google `repo`: manifest-driven, `repo start` gives one branch across projects but
-no worktrees, no isolation. JetBrains documents worktree support as
-single-repository only (multi-root request open). VS Code has an open
-workspace-level worktree request. Container tools (`container-use`, `sculptor`)
-isolate one repo per agent.
+`jj workspace` is several working copies of **one** repo; Sapling likewise.
+Google `repo` gives one branch across projects via `repo start` but no worktrees
+and no isolation. JetBrains documents worktree support as single-repository only.
+`microsoft/vscode#318526` *"Workspace-level Worktree Support"* is **open** and is
+close to a specification of this tool.
 
 ### 2.4 Demand — honest
 
-Two things are true at once.
+**Intensity is real, and verified.**
 
-**Intensity is real.** `openai/codex#11956` (multi-repo support, open, ~75
-reactions, "the only blocker stopping me switching from Cursor"),
-`anthropics/claude-code#23627` (~83–92 reactions, open), `opencode#4251` (user
-with 30+ repos: agents "started working on other repositories where the other
-three sessions were working… I had to revert the last few commits" — closed, not
-planned).
+- `openai/codex#11956` *"Multi-repo support"* — **open**. Neighbouring open
+  issues in the same repo describe the same class:
+  `#33813` *"Codex sandbox mounts empty .git at non-repo workspace root, breaking
+  Git discovery in multi-repo workspaces"*, `#10817` *"Codex App Diff View fails
+  to work with multi-repo directory"*.
+- `anthropics/claude-code#80442` (open, 2026-07-23) is the sharpest single piece
+  of evidence, and it is exactly our scenario: *"The session ran in a
+  `.claude/worktrees/` worktree for repo A (correctly). The task then required
+  Terraform changes in a second repo configured as an additional working
+  directory. The agent edited files and attempted to create a branch and commit
+  **directly in that second repo's primary checkout, on `main`**, instead of
+  creating a worktree there as well."*
+- Also open: `#73824` *"EnterWorktree fails for sub-repo worktrees in multi-repo
+  workspaces"*, `#78505` *"Cloud multi-repo sessions never load repo
+  `.claude/settings.json`"*, `#56853` *"Multi-folder workspace support in Claude
+  Desktop for cross-repo dev"*, `#85448` (subagent worktree isolation binds to
+  the caller's cwd, not the target repo).
 
-**Volume is small.** Multi-repo is roughly 4% of the parallel-agent conversation.
-Inside `anthropics/claude-code` the ratio of "worktree" to "multi-repo" issue
-titles is about 30:1. Best-ever Show HN in this niche: 14 points, against
-200–280 for single-repo equivalents. No funded company in the space. The 2026
-industry narrative is pushing *toward* monorepos precisely because agents want
-one context root.
+**Volume is small.** Multi-repo terms are a low-single-digit percentage of
+worktree-related issue titles in `anthropics/claude-code`. Show HN posts in this
+niche top out in the tens of points, against 200+ for single-repo equivalents. No
+funded company is building the one-branch-across-many-repositories shape; funded
+companies occupy the single-repo and container-per-agent shapes.
 
-**Realistic outcome if we win: 1–3k stars. More likely 100–500.** Kill criterion
-in §9.
+**Realistic outcome if we win: low thousands of stars at best, more likely low
+hundreds.** Kill criterion in §9.
 
 ---
 
 ## 3. Verified hazards
 
-Everything here was reproduced on this machine (macOS Darwin 25.6.0 / APFS,
-git 2.50.1, Claude Code 2.1.220) during design. Each one is both a design
-constraint and an acceptance test.
+Reproduced on the environment named at the top. Each is a design constraint and
+an acceptance test. Where a hazard is a property of a specific Claude Code
+version, that version is named — those are observations to re-verify per release,
+not permanent facts.
 
-### H1 — `git worktree remove` destroys ignored files with no `--force`
+### H1 — `git worktree remove` destroys ignored files without `--force`
 
 A worktree whose only remaining content is a gitignored `.env` is deleted, exit
-code 0. Git does not consider ignored files work. Generalises to ignored
-*directories*. **Delegating removal to git is not safe.**
+0. Generalises to ignored directories. Git's non-force refusal fires only on
+modified-tracked or untracked-non-ignored content. **Removal cannot be delegated
+to git.**
 
 ### H2 — `git status --porcelain` is empty during rebase, bisect and on detached HEAD
 
-Git's own non-force refusal only fires on modified-tracked or
-untracked-non-ignored content. An interactive rebase in progress, a bisect, or
-commits made on a detached HEAD present as clean. Removal then takes
-`.git/worktrees/<wt>/logs/HEAD` with it, and a later `gc --prune=now` erases the
-commits. **Preflight cannot be `git status`.**
+An interactive rebase, a bisect, or commits made on a detached HEAD present as
+clean, so removal proceeds and takes `.git/worktrees/<wt>/logs/HEAD` with it; a
+later `gc --prune=now` erases the commits. **Preflight cannot be `git status`.**
 
-### H3 — `rm -rf link/` follows the symlink
+Related and useful: `git worktree lock` makes a worktree refuse both `remove` and
+`remove --force` (needs `-f -f`). `wkt` locks every worktree it creates.
+
+### H3 — deletion primitives that follow symlinks
 
 ```
 rm -rf tree/        # symlinked target survives
-rm -rf tree/link/   # target directory is DESTROYED, dangling link remains
+rm -rf tree/link/   # DESTROYS content under the target (macOS: the target
+                    # directory itself is unlinked, dangling link left behind)
 ```
-The tree still looks intact afterwards. Go's `os.RemoveAll` is immune in every
-variant including a joined trailing slash — one reason for choosing Go.
+`find -L <tree> -delete` destroys the target too. Go's `os.RemoveAll` is immune
+in every variant tested including a joined trailing slash — one reason for
+choosing Go. **Immunity is a property of the deletion primitive, not of the
+language: no shell-out for removal, ever, and never a symlink-following walker.**
 
 ### H4 — stashes carry no worktree identity
 
@@ -155,103 +210,163 @@ repository. The only signal in the object or reflog is git's auto-generated
 `stash drop` was demonstrated deleting a third task's stash under concurrency.
 **Never resolve a stash by index; resolve to a SHA and re-verify.**
 
+A per-worktree ref namespace *does* exist — `refs/worktree/*` is genuinely scoped
+per worktree — so a stash **wkt creates itself** can be attributed. A stash the
+user or agent creates with plain `git stash` cannot.
+
 ### H5 — the linked worktree's gitdir lives inside the workspace
 
 `<workspace>/<repo>/.git/worktrees/<task>/`. Deny writes to the workspace and
-`git add` fails with `Unable to create … index.lock: Operation not permitted`.
-The agent can edit and cannot commit. Reproduced independently three times.
+`git add` fails at `…/index.lock` — `Operation not permitted` under a sandbox
+deny rule, `Permission denied` under `chmod -R a-w`. Same failure, different
+errno. The agent can edit and cannot commit. Reproduced independently three
+times. **This forces the store design in §5.2.**
 
-Carve-outs are dead twice over: Claude Code will not honour `allowWrite` beneath
-a `denyWrite` subpath, and at OS level any hole big enough to commit
-(`objects/` plus a writable ref path) yields branch hijack via `packed-refs`,
-RCE via `core.pager`, and a `post-commit` hook that fires later in the
-developer's *unsandboxed* shell. **This forces the store design in §5.2.**
+Note on carve-outs: a hole sized exactly to permit committing
+(`objects/`, `refs/`, `logs/`, `packed-refs`, `.git/worktrees/<task>/`) already
+yields branch hijack over the developer's own branches, which is enough to reject
+it. It does *not* by itself yield `core.pager` RCE or a `post-commit` hook —
+those live in `config` and `hooks/`, which such a carve-out excludes. Claude
+Code's own sandbox ships a linked-worktree carve-out of this shape. We reject the
+approach anyway because it leaves the developer's refs writable by an agent, and
+because the store removes the need for any hole at all.
 
-### H6 — the settings perimeter is discovered from cwd
+### H6 — the perimeter is discovered at cwd, and instruction files relocate
 
-Generated deny rules hold at the tree root and stop applying one directory into
-any symlink pointing out of the tree: the config root relocates, and the
-workspace's `CLAUDE.md` loads in place of the task's. Same prompt, same target,
-only cwd differs.
+Two distinct failures, previously conflated:
+
+(a) Claude Code loads `.claude/settings.json` **from the session's cwd**. A
+session whose cwd is a subdirectory of the tree does not pick up a perimeter file
+written at the tree root — this is true for ordinary subdirectories, not only for
+symlinks.
+
+(b) `CLAUDE.md` discovery walks parents of the *physical* path, so a cwd inside a
+symlink that points out of the tree loads the workspace's instructions instead of
+the task's.
+
+Consequences for §5.6: the perimeter must be written where the session will
+actually look, for every plausible session cwd, and its coverage must be
+verifiable at runtime rather than assumed.
 
 ### H7 — the container directory is a cross-task injection channel
 
-With the tree at `<container>/<task>/`, an agent writes `../CLAUDE.md` and a
-fresh session in a **sibling task** loads it. Sibling task trees were also fully
-writable. This is the exact collision the tool exists to prevent, moved one level
-up.
+With the tree at `<container>/trees/<task>/`, an agent writes `../CLAUDE.md` and
+a fresh session in a **sibling task** loads it. Sibling trees were also fully
+writable. The collision the tool exists to prevent, moved one level up.
 
-### H8 — Claude Code's own worktree isolation did not fire
+### H8 — vendor worktree isolation was broken through 2.1.220, fixed in 2.1.222
 
-From a session whose `pwd` was `<repo>/.claude/worktrees/t3`, both a `Write` tool
-call and a Bash redirect wrote into the main checkout. Reproduced twice
-independently, including under `--permission-mode acceptEdits`. The four
-documented enforcement checks are not something to build on.
+On 2.1.220, from a session whose `pwd` was `<repo>/.claude/worktrees/t3`, both a
+`Write` call and a Bash redirect wrote into the main checkout; reproduced twice.
+The Claude Code changelog for **2.1.222** reads: *"Fixed worktree-isolated
+sessions and their subagents being able to run destructive git commands against
+the main checkout; isolation now applies to file edits and Bash in every session
+type."* Independently, `anthropics/claude-code#80442` (open) reports the same
+class of failure from the desktop app.
 
-### H9 — `WorktreeRemove` never fires
+**So this is not a live vendor defect and must not be presented as one.** What
+remains true, and is the actual argument: the vendor's isolation protects exactly
+**one** main checkout — the repository the session was launched from. In a
+workspace of four repositories, the other three are unprotected by construction,
+which is what `#80442` describes. Re-verify this hazard on the current release
+before publishing, and record the version.
 
-Neither on the hook path nor on the built-in path. `ExitWorktree(remove)` in a
-non-git workspace refuses permanently. Any plugin-driven task leaks its tree,
-branches and worktree registrations. **A removal guarantee cannot live in a
-hook.**
+### H9 — `WorktreeRemove` did not fire in the non-git workspace path
+
+On 2.1.220, in a non-git workspace driven by a `WorktreeCreate` hook,
+`ExitWorktree(remove)` refused permanently and `WorktreeRemove` consequently
+never fired, so a plugin-driven task leaks its tree, branches and registrations.
+Scope this claim to what was observed rather than asserting the hook never fires
+anywhere. **Either way, a removal guarantee cannot live in a hook: the documented
+contract says `WorktreeRemove` cannot block, and its failures are logged in debug
+mode only.**
 
 ### H10 — one branch name breaks five ways
 
-Existing divergent branch (silently reused → repos on different bases);
-default branch not `main` (aborts mid-set, no rollback, partial tree left);
+Existing divergent branch, silently reused → repositories on different bases;
+default branch not `main` → aborts mid-set with no rollback and a partial tree;
 branch already checked out elsewhere; D/F ref conflict (`feat/42` permanently
-blocks `feat`); case-fold collapse on APFS (macOS and Linux disagree).
+blocks `feat`); case-fold collapse on APFS, so macOS and Linux disagree.
 
 ### H11 — `--shared` alternates die to a workspace `gc`
 
-A bare mirror created with `git clone --shared` lets a task worktree commit while
-the workspace is fully write-denied — but once the base commit becomes
-unreachable in the workspace and `git gc --prune=now` runs there, the tree
-reports `fatal: bad object HEAD` and store `fsck` reports an invalid sha1
-pointer. Mitigation, verified: pin `refs/wkt/base/<task>` **in the workspace
-repo** before the store fetch, delete only at teardown.
+Verified both halves. A store created with `git clone --shared` borrows objects
+from the workspace repository. Once the base commit becomes unreachable there and
+`git gc --prune=now` runs, the tree reports `fatal: bad object HEAD`. Pinning
+`refs/wkt/base/<task>` **in the workspace repository, before the store is
+created**, prevents it.
+
+The pin does not make the store independent — see §5.2, which states precisely
+what the store does and does not survive.
 
 ### H12 — atomic-save severs a symlink
 
 `mv`, `perl -i`, `jq > tmp && mv`, and any editor's write-temp-then-rename
 replace the *link* with a regular file. The perimeter protects the target, not
-the link slot — and a blocked write teaches the agent to do exactly this.
+the link slot — and a blocked write teaches the agent to do exactly this. `vim`
+and BSD `sed -i` behave better (write through, or fail loudly).
 
-### H13 — the perimeter can protect itself
+### H13 — the perimeter can be made to protect itself
 
-Adding `Edit(<tree>/.claude/**)` to deny and `<tree>/.claude` to
-`sandbox.filesystem.denyWrite` blocked the Write tool, a Bash redirect **and**
-`rm -f` against the settings file, while normal writes inside the tree still
-worked. Use it.
+Claude Code already treats settings files as protected; adding
+`Edit(<tree>/.claude/**)` to deny and `<tree>/.claude` to
+`sandbox.filesystem.denyWrite` was verified to block the Write tool, a Bash
+redirect **and** `rm -f` against the settings file, while ordinary writes inside
+the tree still worked.
 
 ### H14 — the `WorktreeCreate` payload differs from the public docs
 
 Observed on 2.1.220: `{session_id, transcript_path, cwd, hook_event_name, name}`,
 with `CLAUDE_PROJECT_DIR` in the environment. `transcript_path` names a file that
 is never created. `--resume --worktree` re-fires the event. Treat the payload
-shape as unstable and pin a tested version range.
+shape as unstable, tolerate unknown fields, and pin a tested version range.
 
 ### H15 — the store design works (verified end to end)
 
-Not a hazard but the load-bearing positive result, reproduced here rather than
-taken on trust:
+The load-bearing positive result, reproduced rather than taken on trust. Note the
+`chmod` toggles: the write-denied commit and the workspace `gc` were tested as
+two separate conditions.
 
 ```
-git clone --shared --bare <ws>/services/svc-a  <container>/store/svc-a.git   # 88K
-git -C <container>/store/svc-a.git remote set-url origin <real origin>
+# pin FIRST, so no gc window exists before the store references the base
 git -C <ws>/services/svc-a update-ref refs/wkt/base/feat-42 <base-sha>
-git -C <container>/store/svc-a.git worktree add -b feat-42 <tree>/services/svc-a main
-chmod -R a-w <ws>/services/svc-a          # workspace fully read-only
-# in the tree:
-git add -A && git commit   -> succeeds
-git push -u origin feat-42 -> succeeds, branch lands on the real remote
-# then, back in the workspace:
-git reflog expire --expire=now --all && git gc --prune=now
-# tree still healthy, log intact
+git clone --shared --bare <ws>/services/svc-a <container>/store/<id>.git    # 88K
+git -C <container>/store/<id>.git remote set-url origin <repo's real origin>
+git -C <container>/store/<id>.git config remote.origin.fetch \
+    '+refs/heads/*:refs/remotes/origin/*'          # bare clones set NO refspec
+git -C <container>/store/<id>.git worktree add -b feat-42 <tree>/services/svc-a main
+
+chmod -R a-w <ws>/services/svc-a                   # workspace read-only
+#   in the tree: git add -A && git commit  -> succeeds
+#                git push -u origin feat-42 -> succeeds, lands on the real remote
+chmod -R u+w <ws>/services/svc-a
+#   in the workspace: git reflog expire --expire=now --all && git gc --prune=now
+#   tree still healthy, log intact
 ```
 
-The worktree's gitdir resolves to `<container>/store/svc-a.git/worktrees/…`,
+The worktree's gitdir resolves under `<container>/store/<id>.git/worktrees/…`,
 which is why the commit succeeds while the workspace is unwritable.
+
+**The refspec line is not optional.** `git clone --bare` writes no
+`remote.origin.fetch`, so without it the store never creates `refs/remotes/*` —
+which breaks both the sync path (§5.2) and the unpushed-commit check (§5.7),
+silently and in the dangerous direction.
+
+### H16 — the store and the perimeter compose (verified)
+
+The first draft of §5.6 denied writes to the store, which would have re-broken
+H5. The corrected shape was verified with a live Claude Code session in a tree
+whose perimeter carried `allowWrite: [<container>/store]` together with narrower
+`denyWrite` entries for the store's `hooks/`:
+
+| Attempt from inside the tree | Result |
+|---|---|
+| `git add -A && git commit` in a materialised repo | **succeeds** |
+| `echo x > <store>/svc-a.git/hooks/post-commit` | `operation not permitted` |
+| `echo x > <workspace>/services/svc-a/src/index.js` | `operation not permitted` |
+
+So a narrower `denyWrite` does win over a broader `allowWrite`, which is what
+makes the store writable for commits while its hook directory stays closed.
 
 ---
 
@@ -263,15 +378,28 @@ workspace with a coherent base.
 **Line two:** each task tree keeps agents inside it by default, so a run in one
 task does not land in another task's checkout.
 
-Isolation is deliberately *not* the headline. We measured our own perimeter and
-it is defeated by `cd` into a symlink, by a path alias, by a shared parent
-directory, and by severing a link. Selling it as a boundary invites a comparison
-with containers that we lose, and a comparison with vendor-native sandboxing that
-we also lose. Selling the shape is defensible: no vendor is going to ship
-"materialise a mirrored slice of a plain directory full of repositories".
+Isolation is deliberately not the headline. We measured our own perimeter and it
+is defeated by a cwd change, by a path alias, by a shared parent directory and by
+severing a link. Selling it as a boundary invites a container comparison we lose
+and a vendor comparison we lose. Selling the shape is defensible: no vendor is
+going to ship "materialise a mirrored slice of a plain directory full of
+repositories".
 
-Single-repo is supported as a degenerate case but is not pitched. For one
+Single-repo is supported as a degenerate case but not pitched. For one
 repository, `claude --worktree` or `worktrunk` is the honest recommendation.
+
+### 4.1 Why the small-audience reading might be wrong
+
+§2.4 says the audience is small, and §2.2 says a dozen people already tried. Both
+are true, and here is the checkable proposition that would make this attempt
+different: **every prior attempt flattened the tree, and none refused to lose
+work.** If the reason none of them retained users is that a flattened tree breaks
+cross-repo references and their teardown destroyed something, then shape and
+safety are the product and the audience was never the problem. If instead people
+tried them, found them fine, and simply stopped needing them, the audience is the
+problem and no amount of correctness fixes it.
+
+That is a testable difference, and the first thirty days after launch answer it.
 
 ---
 
@@ -281,48 +409,67 @@ repository, `claude --worktree` or `worktrunk` is the honest recommendation.
 
 ```
 <container>/
-  store/<repo-id>.git    bare mirror per repository
-  trees/<task>/          task trees
+  store/<repo-id>.git      bare mirror per repository
+  trees/<task>/            task trees
   state/tasks/<task>.json  authoritative task state
-  staging/               teardown fence
-  cache/                 shared package caches (pnpm store, GOMODCACHE, …)
+  staging/                 teardown fence
 ```
 
-Default location `<workspace>.worktrees/`, **configurable**, with fallback to
+Default location: the workspace path with `.worktrees` appended as a **sibling**
+— `/Users/me/work` → `/Users/me/work.worktrees`. The container must never be a
+descendant of the workspace. Configurable per §5.9, with fallback to
 `~/.local/state/wkt/<workspace-id>/` when the workspace's parent is not writable
-(`$HOME` and volume roots are root-owned — reproduced) or when the workspace
-lives under a known sync root (iCloud, Dropbox).
+(`$HOME` and volume roots are root-owned — reproduced) or when the workspace sits
+under a known sync root.
 
-`wkt` owns the container level and guarantees no `CLAUDE.md` / `AGENTS.md` there,
-re-asserting that guarantee on every start (H7).
+`wkt` owns the container and guarantees no `CLAUDE.md` / `AGENTS.md` at that
+level, re-asserting the guarantee on every start (H7).
+
+No shared `cache/` in v0: a writable directory shared by all tasks is a
+cross-task channel by the same argument as H7, and §1.1 says runtime environment
+is out of scope.
 
 ### 5.2 Store — the foundation, not an optimisation
 
-Per repository:
+Per repository, in this order (H15):
 
-```
-git clone --shared --bare <workspace>/<repo> <container>/store/<id>.git
-git -C <container>/store/<id>.git remote set-url origin <repo's real origin>
-git -C <workspace>/<repo> update-ref refs/wkt/base/<task> <base-sha>   # H11 pin
-```
+1. `git update-ref refs/wkt/base/<task> <base-sha>` **in the workspace repo**;
+2. `git clone --shared --bare <workspace>/<repo> <container>/store/<repo-id>.git`;
+3. `git remote set-url origin <the repository's real origin>`;
+4. `git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`;
+5. `git config gc.auto 0`, `git config core.hooksPath /dev/null` (the store never
+   runs hooks; the workspace's hooks are not inherited and none are wanted);
+6. `git worktree lock` on every worktree created.
 
-Task worktrees are cut from the store. Consequences:
+`<repo-id>` is a collision-free function of the workspace-relative path, **never
+the basename**: `slug(rel-path) + "-" + hex(sha256(canonical-abs-path))[:8]`, so
+`services/api` and `tools/api` cannot collide.
 
-- the worktree's gitdir is inside the store, which is writable → `git add`,
-  `commit`, `rebase` work with the **workspace fully write-denied** (fixes H5);
-- the developer's `hooks/`, `config`, `refs/heads` are out of the agent's reach —
-  no RCE path, no branch hijack;
-- teardown's blast radius is a directory `wkt` owns;
-- the task survives the developer deleting or re-cloning the workspace repo;
-- history is read through alternates, so the store costs kilobytes.
+**What this buys.** The worktree's gitdir is inside the store, which is writable,
+so `git add`, `commit` and `rebase` work with the workspace fully write-denied
+(fixes H5). The *workspace* repository's `hooks/`, `config` and `refs/heads` are
+out of the agent's reach — no hijack of the developer's branches. Teardown's
+blast radius is a directory `wkt` owns.
 
-**Accepted cost:** the task branch does not appear in the developer's
-`git branch` until fetched back. This is a real UX change; `wkt status` must
-state it, and `wkt fetch <task>` brings the branch into the workspace repo on
-demand.
+**What this does not buy.** The store has its own `hooks/` and `config`, and they
+sit in a directory the agent can write; §5.6 denies them explicitly and step 5
+disarms hooks. And `--shared` means the store *borrows* objects: it does **not**
+survive the workspace repository being deleted or re-cloned, only a workspace
+`gc` (with the pin). If durability against deletion is wanted later, the store
+must be de-borrowed with `git repack -a -d` after creation, at the cost of a full
+object copy — an explicit, opt-in trade, not the default.
 
-**Mandatory guard:** the `refs/wkt/base/<task>` pin, created before the store
-fetch and removed only at teardown, plus `gc.auto` guarded in the store.
+**Sync.** With step 4 in place, `git -C <store> fetch origin` populates
+`refs/remotes/origin/*`, which makes both `wkt sync` and the unpushed-commit
+check work. `wkt sync <task>` fetches in every store of the set and reports how
+far each repository's base has drifted; advancing the base is the user's call and
+is done for the whole set together, never per repository.
+
+**Accepted cost.** The task branch lives in the store, so it does not appear in
+the developer's `git branch` until fetched back. `wkt status` states this, and
+`wkt fetch <task>` brings it into the workspace repositories on demand —
+refusing, never forcing, when the workspace already has a diverged ref of that
+name (§6).
 
 ### 5.3 Tree layout
 
@@ -333,8 +480,8 @@ fetch and removed only at teardown, plus `gc.auto` guarded in the store.
   services/svc-b  -> <workspace>/services/svc-b              not in the task
   shared          -> <workspace>/shared                      not in the task
   notes           -> <workspace>/notes                       non-git directory
-  CONVENTIONS.md     copy (reconciled at teardown)           loose file
-  .wkt/task.json     authoritative state
+  CONVENTIONS.md     copy (hash-recorded, reconciled at teardown)
+  .wkt/task.json     read-only mirror of state/tasks/feat-42.json
   .claude/settings.json  generated perimeter, self-protecting (H13)
 ```
 
@@ -344,147 +491,221 @@ Rules:
    flattened, no option to flatten.
 2. **Directories on the path to a selected repo are materialised**, not
    symlinked — `services/` is a real directory. Only leaves are linked.
-3. **Un-materialised repositories are symlinked at their mirrored positions.**
-   Without this, mirroring delivers nothing under a partial repo set:
-   `../../shared` from `services/svc-a` points at a hole. Verified: with the
-   symlink in place the reference resolves, and this works *only* under
-   mirroring.
-4. **The "is this a repository" scan is unbounded in depth**, even though the
-   "is this one of my repositories" scan is not. A repo hiding below the
-   discovery depth inside a symlinked directory would otherwise be shared by
-   every task — the original collision, reproduced inside the tool.
-5. **Loose files are copied**, not symlinked, and reconciled at teardown (H12).
-   Every link slot is `lstat`-checked at teardown; a slot that is no longer a
-   symlink blocks removal.
-6. **Nested repositories (one repo inside another) are refused** at `init` with
-   a named error. Mirroring can otherwise place one worktree inside another's
-   ignored subtree, where removing the outer destroys the inner silently.
+3. **Un-materialised repositories are symlinked at their mirrored positions**,
+   with **absolute** targets. Without this, mirroring delivers nothing under a
+   partial repo set: `../../shared` from `services/svc-a` points at a hole.
+   Verified: with the symlink in place the reference resolves, and this works
+   *only* under mirroring.
+4. **Two different scans, two different bounds.** Repository *enumeration* runs
+   to a configurable depth (default 4) and does **not** follow symlinks. The
+   *nested-repo and foreign-`.git` scans* are unbounded in depth, also without
+   following symlinks, and run at `new` and at `rm`. Every symlink target that
+   `wkt` is about to create is separately resolved and rejected if it contains a
+   repository at any depth — that, not depth-unboundedness, is what prevents a
+   hidden repo being shared by every task.
+5. **Loose files are copied**, with the content hash recorded. Teardown refuses
+   if a copy diverged (§5.7). Link slots are `lstat`-checked at teardown; a slot
+   that is no longer a symlink blocks removal (H12).
+6. **`.git` markers are classified, not refused.** A `gitdir:` file resolving to
+   `<parent>/.git/worktrees/*` is a linked worktree — skipped, never treated as a
+   repository (otherwise `init` fails on any workspace where `claude --worktree`
+   has ever run). A submodule is recorded as part of its superproject. A genuine
+   repository nested inside another repository is refused by name, with
+   `wkt init --exclude <path>` as the escape hatch, recorded in container state.
 
 Why mirroring, precisely: flattening preserves a cross-repo reference A→B **iff
-`dirname(A) == dirname(B)`**. For a workspace whose repos are all top-level, flat
-is a no-op; for `services/svc-a` → `shared` it silently breaks. Two unconditional
-wins flat cannot match: basename collisions (`services/api` and `tools/api`), and
-back-filled un-materialised repos. Do not claim more than that in the README.
+`dirname(A) == dirname(B)`**. For a workspace whose repositories are all
+top-level, flat is a no-op; for `services/svc-a` → `shared` it silently breaks.
+Two unconditional wins flat cannot match: basename collisions (`services/api`
+and `tools/api`), and back-filled un-materialised repositories.
 
 ### 5.4 State
 
-`state/tasks/<task>.json` is **authoritative and versioned**, not a hint:
+`state/tasks/<task>.json` is **authoritative and versioned**. Per repository:
+workspace-relative path, canonical absolute path, `<repo-id>`, branch name, base
+SHA, base ref name, worktree path, **store worktree registration name** (git
+derives it from the leaf basename and silently disambiguates with a numeric
+suffix — `repair` cannot work without it), and the `refs/wkt/base` pin written.
 
-- repo set, and per repository: absolute path, store id, branch name, base SHA,
-  base ref name, worktree path;
-- the base epoch for the whole task;
-- link slots created, with type and target;
-- copied loose files, with content hash;
-- perimeter file hash;
-- container and workspace canonical paths, all known spellings.
+Per task: schema version, the base epoch (an RFC3339 instant recorded at create —
+the wall-clock moment the whole set was resolved), link slots with type and
+absolute target, copied loose files with content hashes, perimeter file hash,
+container and workspace canonical paths with every known spelling.
 
-"Hint only, never authoritative" reads as humility and is in practice a decision
-to have no recovery story — every unrecoverable failure found in review was
-unrecoverable precisely because nothing authoritative was recorded. Git's own
-metadata is not a substitute: `worktree remove` takes the reflog, a re-clone
-takes any refs we wrote.
+"Hint only, never authoritative" was the original position and it was wrong:
+every unrecoverable failure found in review was unrecoverable because nothing
+authoritative was recorded, and git's own metadata is destroyed by exactly the
+operations `wkt` must survive.
 
-**But:** anything that *deletes* still enumerates the filesystem. State says what
+**But:** anything that deletes still enumerates the filesystem. State says what
 should be there; the disk says what is there; `wkt status` reports disagreement
-rather than trusting either.
+rather than trusting either. The copy at `<tree>/.wkt/task.json` is a read-only
+mirror for tools running inside the tree, and is deny-listed in §5.6.
 
 ### 5.5 Branch model
 
-The branch name is the default task label — but **not** the task key. State holds
+The branch name is the default task label, **not** the task key. State holds
 `task → {repo: branch}`, which allows per-repo suffixes when a name is taken.
 
-Create is **two-phase**:
+Create is two-phase:
 
 1. **Resolve and validate across the whole set** before touching anything: base
    per repository (`origin/HEAD` → `init.defaultBranch` → current HEAD, never a
    hardcoded `main`), branch existence locally and on the remote, ancestry
    against the base, `worktree list` occupancy, D/F ref conflicts, case-fold
-   collisions (checked on every platform, not only case-insensitive ones),
-   `check-ref-format`.
-2. **Execute**, with rollback of everything created on any failure.
+   collisions checked on every platform, `git check-ref-format`.
+2. **Execute**, rolling back everything created on any failure.
 
 Never silently reuse an existing branch. Never surface raw git errors — they
 contain absolute paths belonging to other tasks.
 
 ### 5.6 Perimeter
 
-Generated into the tree, self-protecting per H13.
+Generated per §0: defence in depth against accidents, not a boundary.
 
-The two halves are not symmetrical, and the asymmetry must be understood before
-writing the generator.
+The two halves are not symmetrical.
 
-**Bash — already whitelist-shaped.** With `sandbox.enabled`, writes are limited
-to the working directory and the session temp directory by default. Sibling task
-trees, the container, the workspace and the home directory are therefore closed
-to Bash without listing anything. Only `denyRead` needs enumerating.
+**Bash — whitelist-shaped already.** With `sandbox.enabled`, writes are confined
+to the working directory and the session temp directory by default, so sibling
+trees, the workspace and the home directory are closed without listing anything.
+The store is *outside* the working directory and must be reopened explicitly.
 
 **File-editing tools — deny only.** `Edit(…)` rules cover every file-editing
-tool, but there is no allow-list form that survives: a `deny` beats a narrower
-`allow`, so `deny <container>/**` would lock the task out of its own tree.
-The generator therefore emits an explicit, regenerated-at-every-start deny list:
+tool, but a `deny` beats a narrower `allow`, so there is no allow-list form; the
+generator emits an explicit deny list, regenerated on every session start.
 
 ```json
 {
   "permissions": {
     "deny": [
       "Edit(//<workspace>/**)",
-      "Edit(//<container>/store/**)",
       "Edit(//<container>/state/**)",
-      "Edit(//<container>/trees/<other-task>/**)",
-      "Edit(//<tree>/.claude/**)"
+      "Edit(//<container>/staging/**)",
+      "Edit(//<container>/trees/<each-other-task>/**)",
+      "Edit(//<container>/store/*.git/hooks/**)",
+      "Edit(//<container>/store/*.git/config)",
+      "Edit(//<tree>/.claude/**)",
+      "Edit(//<tree>/.wkt/**)"
     ]
   },
   "sandbox": {
     "enabled": true,
     "filesystem": {
-      "denyWrite": ["<workspace>", "<container>/store", "<container>/state",
-                    "<tree>/.claude"],
-      "denyRead":  ["<container>/trees/<other-task>", "~/.ssh", "~/.aws",
-                    "~/.config/gh", "~/.claude"]
-    }
+      "allowWrite": ["<container>/store"],
+      "denyWrite":  ["<workspace>", "<container>/state", "<container>/staging",
+                     "<container>/store/*.git/hooks", "<container>/store/*.git/config",
+                     "<tree>/.claude", "<tree>/.wkt"],
+      "denyRead":   ["<container>/trees/<each-other-task>", "~/.ssh", "~/.aws",
+                     "~/.config/gh", "~/.claude"]
+    },
+    "credentials": { "envVars": [ /* deny the obvious token variables */ ] }
   }
 }
 ```
 
-Every path is listed in **all known spellings** — as typed, `realpath`, and the
-macOS `/private` form. Deny globs are lexical; an alias such as
+`allowWrite` on the store is **mandatory** — the task's gitdir lives there, and
+denying it breaks `git add` exactly as H5 describes. The narrower `denyWrite`
+entries for the store's `hooks/` and `config` still win over the broader allow,
+which is the behaviour we want; `core.hooksPath` is disarmed at store creation as
+a second line.
+
+Every path appears in **all known spellings** — as typed, `realpath`, and the
+macOS `/private` form. Deny globs are lexical: an alias such as
 `~/work -> /Volumes/Data/work` defeats a single spelling entirely.
 
-Sibling trees are enumerated by name, not covered by a glob, because a glob wide
-enough to catch them also catches the task's own tree. That means a tree created
-**after** this one is not in the list until the perimeter is regenerated —
-`wkt status` reports the drift, and the hook regenerates on every session start.
-This is a real limitation, not a rounding error, and belongs in the README.
+**Stated limitations**, all of which belong in the README:
 
-`wkt status` hash-checks the perimeter file and refuses to report "isolated" on
+- Sibling trees are enumerated by name, not by a glob, because any glob wide
+  enough to catch them catches the task's own tree. A tree created *after* this
+  one is uncovered until the perimeter is regenerated. `wkt status` reports the
+  drift; `wkt perimeter <task>` regenerates it.
+- The file lives at the tree root, but Claude Code reads settings from the
+  session's cwd (H6a). A session started inside `<tree>/services/svc-a` does not
+  see it. `wkt` therefore writes the perimeter at the tree root **and** into each
+  materialised repository, and `wkt status` verifies all copies.
+- Link slots point outside the tree. Writes *through* them are denied by the
+  target rules, but the slot itself lives in writable space (H12).
+
+`wkt status` hash-checks every perimeter copy and refuses to report "isolated" on
 drift.
 
 ### 5.7 Teardown
 
-v0 is **refuse-only**. `wkt rm` enumerates from the filesystem and refuses while
-any of the following exists, naming each:
+v0 is **refuse-only**. `wkt rm` enumerates from the filesystem — a walk of real
+directories that never descends link slots — and refuses while any of the
+following exists, naming each:
 
 - uncommitted or untracked content;
-- ignored-but-precious content (`.env*`, credentials, report directories) —
-  regenerable paths (`dist/`, `node_modules/`, `.venv/`) are listed and not
-  blocking, or the guard stops meaning anything;
-- unpushed commits, including the no-upstream and detached-HEAD cases
-  (`rev-list --count HEAD --not --remotes` plus a per-worktree reflog scan);
+- ignored-but-precious content (`.env*`, credentials, report directories);
+  regenerable paths (`dist/`, `node_modules/`, `.venv/`) are listed, not blocking
+  — otherwise `--force` becomes reflexive and stops meaning anything;
+- unpushed commits, checked against `refs/remotes/origin/*` (which exists only
+  because of the refspec in §5.2), including the no-upstream and detached-HEAD
+  cases;
 - in-progress rebase / merge / cherry-pick / revert / bisect;
 - a submodule with commits whose objects live under the doomed worktree;
-- **any `.git` in the tree that does not belong to this task's repo set** —
-  refuse even with `--force`; its history exists nowhere else;
-- a link slot whose type changed (H12);
-- a failed check of any kind — treat "cannot tell" as "would lose work".
+- any `.git` found **without following symlinks** whose `--git-common-dir`
+  resolves inside the task tree — refuse even with `--force`; its history exists
+  nowhere else;
+- a link slot whose type changed, or a copied loose file whose hash diverged;
+- a failed check of any kind — "cannot tell" is treated as "would lose work".
 
-`--force` in v0 does not destroy in place: it `mv`s the whole tree into
-`staging/` in one rename (the fence), then removes from staging. Rollback is
-`mv` back plus `git worktree repair`. Salvage refs and quarantine are deferred to
-v0.2 — a mechanism that restores perfectly is worthless while it fires on the
-wrong condition.
+`--force` does not destroy in place: it `mv`s the whole tree into `staging/` in
+one rename (the fence), then removes from staging. **Before the mv**, the store's
+`gc.auto` is already 0 and every worktree is locked (§5.2), because a moved
+worktree becomes immediately prunable and `git worktree prune` has no grace
+period. Rollback is `mv` back followed by
+`git -C <store> worktree repair <restored-path>` **per repository** — the path
+argument is mandatory; bare `worktree repair` does not rediscover a moved tree.
+If `staging/` would be a cross-device move, the fence degrades to a per-repo
+sequence and `wkt` says so rather than pretending atomicity.
 
-Removal order is innermost-first. All checks for every repository complete before
+Removal is innermost-first, and every check for every repository completes before
 anything is removed.
+
+Salvage refs and quarantine are deferred to v0.2: a mechanism that restores
+perfectly is worthless while it fires on the wrong condition.
+
+### 5.8 Concurrency
+
+The tool exists for two agents working at once, so the critical sections must be
+named:
+
+- **container lock** (`flock` on `<container>/.wkt.lock`) around any set-level
+  create or remove, so two `wkt new` runs cannot interleave two-phase validation
+  and execution (a textbook TOCTOU otherwise);
+- **per-store lock** around teardown and anything gc-sensitive;
+- **atomic state writes** — write to a temporary file in the same directory, then
+  rename;
+- `git worktree lock` on every worktree for its whole life, released only by
+  `wkt rm`;
+- stale-lock sweep by PID, with a `mkdir`-based fallback where `flock` is
+  unavailable.
+
+### 5.9 Configuration
+
+File: `<workspace>/.wkt.toml`, plus `~/.config/wkt/config.toml`.
+Precedence: flag > `WKT_*` environment variable > workspace file > user file >
+built-in default. Keys, all optional: container location, discovery depth,
+excluded paths, branch template, precious/regenerable path classifiers, perimeter
+on/off, tested-git-version override. `wkt config --show` prints the effective
+configuration with the origin of each value.
+
+### 5.10 Errors
+
+Every refusal is structured, because the primary consumer is an agent:
+
+```json
+{"code":"WKT_UNPUSHED","repo":"services/svc-a","path":"…",
+ "expected":"all commits pushed","found":"3 commits ahead of origin/feat-42",
+ "remedy":["wkt push feat-42","wkt rm feat-42 --force"]}
+```
+
+A stable code namespace (`WKT_NESTED_REPO`, `WKT_BRANCH_EXISTS`,
+`WKT_BRANCH_DIVERGED`, `WKT_UNPUSHED`, `WKT_PRECIOUS_IGNORED`,
+`WKT_LINK_SLOT_CHANGED`, `WKT_FOREIGN_REPO`, `WKT_LOCKED`, …), a documented exit
+code per class, and `--json` on every command. Raw git stderr is never
+propagated.
 
 ---
 
@@ -492,139 +713,195 @@ anything is removed.
 
 | Command | Contract |
 |---|---|
-| `wkt init` | Canonicalise the workspace, discover repositories at unbounded depth (`.git` as **file or directory**), refuse nested repos and repos reached through a symlink, verify container writability, create the container, build stores lazily. |
-| `wkt new <task> [--repos a,b] [--all]` | Two-phase create per §5.5. Materialise per §5.3. Write state, perimeter, base pins. Exit non-zero and leave nothing behind on failure. |
-| `wkt add <task> <repo>` | Graft a repository at the task's **recorded base epoch**, not today's `origin/HEAD`. Resolve paths with symlinks expanded; refuse anything outside the tree. |
-| `wkt status [<task>]` | Per repository: branch, base epoch and drift, dirty, ahead/behind, orphaned gitdir, link-slot integrity, perimeter hash. Reports state-vs-disk disagreement. Machine-readable with `--json`. |
+| `wkt init` | Canonicalise the workspace; enumerate repositories to the configured depth without following symlinks; classify `.git` markers per §5.3 rule 6; refuse genuine nested repositories (`--exclude` to override); verify container writability; create the container. `--dry-run` reports before writing anything. |
+| `wkt new <task> [--repos …] [--all]` | Two-phase create (§5.5). `--repos` takes workspace-relative paths; a bare basename is accepted only when unique. With neither flag the default is `--all`. Exits 2 if the task exists. Leaves nothing behind on failure. |
+| `wkt add <task> <repo>` | Grafts at the task's recorded base epoch, not today's `origin/HEAD`. Refuses if the repository is already in the task, the task does not exist, the repository is not in the discovered set, or the base epoch SHA is no longer reachable. |
+| `wkt path <task>` | Prints the absolute tree path, one line; non-zero if the task does not exist. (Required by the acceptance battery.) |
+| `wkt status [<task>]` | Per repository: branch, base epoch and drift, dirty, ahead/behind, orphaned gitdir, link-slot integrity, perimeter hashes. Exit 0 consistent, 3 drift, 4 container missing. `--json`. |
+| `wkt sync <task>` | Fetches in every store of the set, reports base drift for the whole set. Does not advance the base by itself. |
+| `wkt fetch <task>` | Brings task branches into the workspace repositories. Fast-forward only: refuses when the workspace ref exists and is not an ancestor, names both SHAs, offers `--as <name>`. Never a forcing refspec. |
 | `wkt rm <task> [--force]` | §5.7. |
-| `wkt repair <task>` | Fix gitdir back-pointers and relative symlinks after a workspace move or a repo re-clone. |
-| `wkt fetch <task>` | Bring the task branches back into the workspace repositories for local inspection. |
-| `WorktreeCreate` hook | Idempotent, reattach-by-default, tolerant of payload shape, materialises `.claude/settings.json` **before** printing the tree path. No `WorktreeRemove` hook — it never fires (H9). |
+| `wkt perimeter <task>` | Regenerates every perimeter copy; used by the session-start hook and after a sibling task appears. |
+| `wkt repair <task>` | Fixes gitdir back-pointers and link slots after a workspace move or a repository re-clone. Deterministic outcomes per case, specified in the battery. |
+| `wkt doctor` | Reconciles state against disk, store registrations and workspace pins; `--fix`. Also the uninstall path: reports every `refs/wkt/*` written into the user's repositories. |
+| `WorktreeCreate` hook | Idempotent, reattach-by-default, tolerant of payload shape (H14). Materialises the perimeter **before** returning, then emits the documented `hookSpecificOutput` JSON. No `WorktreeRemove` hook (H9). |
 
 Deferred: `wkt run`, salvage/quarantine, `push`/`pr`, `adopt`, size-based
 defaults, learned scope presets, plugin packaging, the `/wkt` skill.
 
 `wkt run` is not merely deferred — as specified it cannot be built. Claude Code's
-Bash tool dies on three undocumented private paths inside an external sandbox;
-making `~/.claude` writable hands the agent hooks, `CLAUDE.md` and a live OAuth
-token, which is strictly worse than no sandbox; and nested sandboxing is refused
-by the kernel, with the agent's observed recovery being to disable its own
-sandbox. Revisit only if the store design changes the premise.
+Bash tool dies on undocumented private paths inside an external sandbox; making
+`~/.claude` writable hands the agent hooks, `CLAUDE.md` and a live OAuth token,
+which is worse than no sandbox; and nested sandboxing is refused by the kernel,
+with the agent's observed recovery being to disable its own sandbox.
 
 ---
 
 ## 7. Acceptance battery
 
-Extends the five tests from the starter pack. Tool-agnostic, pointed at any
-implementation via `WT_CMD`. Every hazard in §3 becomes a test.
+Two batteries, because they need different things.
 
-**From the starter pack:** nested discovery; isolation; destructive cleanup;
-flat-workspace control; foreign repository survives `--force`.
+### 7.1 Mechanical battery — no credentials, no network, CI on macOS and Linux
 
-**Added, each derived from a reproduced failure:**
+Pointed at any implementation via `WT_CMD`, in the style of the starter pack.
+Note that the starter pack's `is_worktree_of` helper — which asserts that the
+tree's `--git-common-dir` equals the *workspace repository's* — is invalidated by
+the store design and must be replaced with: the tree's `--git-common-dir`
+resolves under `<container>/store/`, and the commit is reachable from that store.
+Likewise its "reachable from the original repository" assertion becomes
+"reachable from the store, and from the workspace repository after `wkt fetch`".
+The battery also requires `wkt path`.
 
-1. Ignored `.env` survives a plain `rm` (H1).
-2. Interactive rebase in progress blocks removal (H2).
-3. Detached-HEAD commit blocks removal (H2).
+Every refusal test has a paired positive phase — otherwise a tool whose `rm`
+always refuses passes, and a tool whose `new` always fails passes too.
+
+1. Ignored `.env` survives a plain `rm` (H1); then, once cleaned, `rm` succeeds
+   and leaves no registration in the store.
+2. Interactive rebase in progress blocks removal; then, once concluded, removal
+   succeeds (H2).
+3. Detached-HEAD commit blocks removal; then, once merged or pushed, succeeds (H2).
 4. Symlink target survives teardown, including the trailing-slash path (H3).
-5. A stash made by plain `git stash` in task A is not touched by task B's
+5. A stash made with plain `git stash` in task A is untouched by task B's
    teardown (H4).
 6. `git commit` succeeds inside the tree with the workspace fully write-denied
-   (H5) — the single most important test in the suite.
-7. Writing `../CLAUDE.md` from inside a tree does not reach the container (H7).
-8. A sibling task tree is neither readable nor writable from another task (H7),
-   **including a sibling created after this task's tree** — the case the deny
-   enumeration in §5.6 does not cover until the perimeter is regenerated.
-9. Existing divergent branch in one repo of the set aborts create and leaves
-   nothing behind (H10).
-10. Non-`main` default branch in one repo of the set aborts create cleanly (H10).
-11. `gc --prune=now` in the workspace does not break a live task tree (H11).
+   (H5) — the single most important test.
+7. After `new`, every store's `origin` equals the workspace repository's origin,
+   and a push from the tree lands the branch on that remote. Without this an
+   implementation that omits one line passes everything else while pushing
+   nowhere.
+8. Existing divergent branch in one repository aborts create, leaving nothing (H10).
+9. Non-`main` default branch in one repository aborts create cleanly (H10).
+10. D/F ref conflict and case-fold collision each abort create (H10).
+11. `gc --prune=now` in the workspace does not break a live tree (H11).
 12. An atomic-save that severs a link slot blocks removal (H12).
-13. The agent cannot rewrite or delete its own perimeter file (H13).
+13. A diverged copied loose file blocks removal (§5.3 rule 5).
 14. Partial repo set: `../../shared` resolves from `services/svc-a` through the
     back-filled symlink.
-15. A repository deleted from the workspace while its tree lives: `repair`
-    recovers or refuses, and never silently destroys.
+15. A repository deleted from the workspace: `repair` exits non-zero with
+    `WKT_STORE_ORPHANED` and destroys nothing; a repository *moved*: `repair`
+    exits 0 and the tree's HEAD is unchanged.
+16. Concurrency: two `wkt new` runs on overlapping repository sets started
+    simultaneously — exactly one wins per repository, the loser exits non-zero
+    and leaves nothing.
+17. Interrupted create (`kill -9` mid-run) leaves nothing behind, and `doctor`
+    reports a clean container.
+18. A workspace containing a pre-existing linked worktree (`.git` as a file) is
+    discovered correctly and not treated as a repository.
+19. Flat-workspace control — the whole suite against a flat layout, green from
+    the first commit.
+
+### 7.2 Perimeter battery — requires a Claude Code session
+
+Gated, run manually or in a credentialed CI job, pinned to a Claude Code version
+range and re-run per release:
+
+20. A write into the workspace is refused from the tree root **and** from inside
+    a materialised repository (H6a).
+21. Writing `../CLAUDE.md` does not reach the container, and a sibling task's
+    session does not load it (H7).
+22. A sibling tree is neither readable nor writable — including a sibling created
+    after this tree, where `wkt status` must report drift and `wkt perimeter`
+    must close it (§5.6).
+23. The agent cannot rewrite or delete any perimeter copy (H13).
+24. H8 re-verification against the current release: what the vendor's own
+    isolation covers, and what it leaves uncovered in a multi-repo workspace.
+
+**Coverage map.** H1→1, H2→2/3, H3→4, H4→5, H5→6, H6→20, H7→21, H8→24, H9→
+(observation, no test — the hook cannot block by contract), H10→8/9/10, H11→11,
+H12→12, H13→23, H14→(observation, pinned version range), H15→6/7, H16→6/7 plus perimeter test 20.
 
 ---
 
 ## 8. Form factor and distribution
 
-Single repository containing:
-
-- **the binary** (Go, static, macOS + Linux) — the product;
-- **a `WorktreeCreate` hook script** giving native `claude --worktree <task>`;
-- README carrying §1.1 verbatim.
+Single repository containing the binary (Go, static, macOS + Linux), the
+`WorktreeCreate` and session-start hook scripts, and a README carrying §0 and
+§1.1 verbatim.
 
 Go over Rust: single static binary, trivial cross-compilation, low contribution
 barrier, and `os.RemoveAll` immunity to H3. The workload is filesystem walking,
-shelling to git and JSON — no part needs Rust's guarantees more than it needs
-contributors.
+shelling to git and JSON.
 
-Plugin packaging and the `/wkt` skill are v0.1. The plugin marketplaces contain
-no worktree/multi-repo workspace manager at all, so the channel stays open.
+**Minimum git:** 2.30 (`worktree repair`); tested on 2.50.1. `wkt doctor`
+refuses on anything below the floor.
+
+Plugin packaging and the `/wkt` skill are v0.1. Note that the Claude Code plugin
+marketplaces already carry worktree plugins — including worktrunk's own — so the
+channel is not empty; what is absent is a mirrored multi-repo workspace manager.
 
 Distribution: GitHub Releases and `go install` at launch; Homebrew when the
-notability gate (75★ third-party / 225★ self-submitted) is met.
+notability gate is met — 30 forks / 30 watchers / 75 stars for a third-party
+submission, 90 / 90 / 225 for a self-submission, and the repository must be at
+least 30 days old.
 
-Launch: post into the threads where the demand is already documented and named —
-`openai/codex#11956`, `anthropics/claude-code#23627`, `microsoft/vscode#318526`,
-`worktrunk#3501` — rather than a Show HN with "worktree" in the title, which
-measurably does not work in this category.
+Launch: post into live threads where the need is documented —
+`openai/codex#11956`, `anthropics/claude-code#80442` and its neighbours,
+`microsoft/vscode#318526`. Not `worktrunk#3501`: it is closed, self-filed and
+self-closed, and reaches nobody.
 
 ---
 
 ## 9. Plan
 
-**v0 — 6–8 developer-weeks.** §6 minus deferrals, battery green.
+**v0 — 12–16 developer-weeks.** The earlier 6–8 estimate did not survive §5:
+two-phase create with rollback, canonicalisation across spellings, the classified
+scan, authoritative state with a reconciler, `repair`, the staging fence, the
+concurrency section and two batteries are each multi-day items, and the
+mechanical battery alone is roughly two weeks.
 
-Build order: `init` → store + base pins → `new` (two-phase) → `status` → `rm`
-(refuse-only) → perimeter → `repair` → hook. Keep the flat-workspace control test
-green from the first commit.
+If 6–8 weeks is the constraint, the honest cut is: no `repair`, no `doctor`, no
+state reconciler, refuse-only `rm` without the submodule and precious-file
+classifiers, bounded discovery only, and no perimeter battery. Say which was
+chosen.
+
+Build order: `init` → store and base pins → perimeter generator → `new`
+(two-phase) → `status` → `rm` (refuse-only) → `add` → `fetch` → `sync` →
+`repair` → `doctor` → hooks. Keep the flat-workspace control green from the
+first commit.
 
 **Kill criterion.** If installs and stars are negligible 30 days after launch,
-the 78-star ceiling was real. Stop, and publish the battery plus the hazard
+§4.1's second reading was right. Stop, and publish the battery and the hazard
 register as a standalone artifact — that has value even if the tool does not.
-
-**Deliberately unfunded:** the full design as first drafted was estimated at
-22–30 developer-weeks, and `wkt run` never finishes at all.
 
 ---
 
 ## 10. Open questions
 
-1. Container naming and the exact fallback rule when the parent is unwritable,
-   the workspace is `$HOME`, or it sits under a sync root.
-2. State file format and migration policy.
-3. Branch namespacing: bare `<task>` or `wkt/<task>`. Namespacing removes D/F
-   collisions between `feat` and `feat/42` but makes branches uglier in the
-   forge.
-4. Path-length warning threshold (macOS `AF_UNIX` caps at 103 bytes, which
-   mirroring plus the container level can exceed; a short exported `TMPDIR` is
-   the likely mitigation).
-5. Whether `wkt init` should offer to add the container to the workspace
+1. Branch namespacing: bare `<task>` or `wkt/<task>`. Namespacing removes D/F
+   collisions but makes branches uglier in the forge.
+2. Path-length policy (macOS `AF_UNIX` caps at 103 bytes; mirroring plus the
+   container level can exceed it). A short exported `TMPDIR` is the likely
+   mitigation.
+3. Whether `wkt init` should offer to add the container to the workspace
    repositories' `.gitignore` files.
-6. Whether the perimeter should be opt-out for users who dislike generated
-   settings files.
+4. Whether the perimeter is opt-out.
+5. Credential model for push and PR from inside a task: SSH agent forwarding, a
+   scoped token, or an out-of-tree helper. H15 pushed to a local-path remote;
+   a real `git@` origin is untested under the perimeter.
+6. Which git config the store inherits from the workspace repository (`user.*`,
+   `commit.gpgsign`, `gpg.*`, `core.sshCommand`, `url.*.insteadOf` — but
+   explicitly not `core.hooksPath`).
+7. Licence and contribution policy before the first public commit.
 
 ---
 
 ## 11. Decision log
 
-| # | Decision | Status after adversarial review |
+| # | Decision | Status after two adversarial passes |
 |---|---|---|
-| D1 | Trees outside the workspace | Kept; container location made configurable, container guaranteed free of agent instruction files |
+| D1 | Trees outside the workspace | Kept; container configurable, guaranteed free of agent instruction files |
 | D2 | Mirror the workspace shape, never flatten | **Survives**; strengthened by back-filling un-materialised repos |
-| D3 | Non-git content symlinked | Changed: ancestor directories materialised, loose files copied and reconciled, repo scan unbounded in depth |
-| D4 | Atomic teardown, `--force` salvages | Changed: v0 refuse-only, staging-rename fence, salvage deferred |
-| D5a | Perimeter via generated settings | Changed: canonicalised, self-protecting, described as accident prevention |
+| D3 | Non-git content symlinked | Changed: ancestors materialised, loose files copied and hash-reconciled, scans split by purpose |
+| D4 | Atomic teardown, `--force` salvages | Changed: v0 refuse-only, staging fence with locks, salvage deferred |
+| D5a | Perimeter via generated settings | Changed: canonicalised, self-protecting, written per repository, store explicitly writable, limits stated |
 | D5b | `wkt run` OS sandbox | **Killed** — not buildable as specified |
 | D6 | Whole workspace readable | Changed: sibling trees and credential paths deny-read |
-| D7 | Mutable repo set | Changed: base epoch recorded per repo; size-defaults and presets cut |
+| D7 | Mutable repo set | Changed: base epoch defined as a recorded instant; size-defaults and presets cut |
 | D8 | One branch name across repos | Changed: default label, not the key; per-repo mapping; two-phase create |
-| D9 | Own engine | Kept; worktrees addressed by absolute path only; `adopt` deferred |
-| D10 | Go, macOS + Linux | Kept |
-| D11 | Binary + plugin + skill | Changed: binary + `WorktreeCreate` hook in v0; `WorktreeRemove` removed entirely |
-| D12 | `status` + `push` + PR | Changed: `status` in v0, `push`/PR deferred to v0.1 |
-| D13 | Isolation as the headline | **Inverted**: multi-repo shape leads, isolation is line two |
-| D14 | *(new)* Bare mirrors in the store | Added — without it `commit` and the perimeter are mutually exclusive |
+| D9 | Own engine | Kept; worktrees addressed by absolute path; `adopt` deferred |
+| D10 | Go, macOS + Linux | Kept; git floor 2.30 stated |
+| D11 | Binary + plugin + skill | Changed: binary + hooks in v0; no `WorktreeRemove` |
+| D12 | `status` + `push` + PR | Changed: `status`/`sync`/`fetch` in v0; `push`/PR deferred |
+| D13 | Isolation as the headline | **Inverted**: multi-repo shape leads |
+| D14 | Bare mirrors in the store | Added — without it `commit` and the perimeter are mutually exclusive |
+| D15 | State authoritative, not a hint | **Reversed** from the first draft — every unrecoverable failure in review was unrecoverable because nothing authoritative was recorded |
