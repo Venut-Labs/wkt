@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -598,5 +599,39 @@ func TestNewRefusesTwoPositionalsExitsTwo(t *testing.T) {
 	errb.Reset()
 	if code := Run([]string{"path", "task1", "--workspace", ws}, &out, &errb); code == 0 {
 		t.Fatal("a refused two-positional new must not have created task1")
+	}
+}
+
+// TestSplitPositionalDerivesValueFlagsFromTheFlagSet is review finding
+// Minor 9: which flags consume a separately-typed value used to be a
+// hand-maintained map, independent of the FlagSet actually being parsed. A
+// future flag added to the FlagSet but forgotten in that map silently
+// reintroduces the exact round-2 bug (a value flag's argument mistaken for
+// the positional, or vice versa) — which already happened once on this
+// branch. Registers a brand-new string flag, "--extra", that has never
+// appeared in any hardcoded list anywhere, and checks that its
+// separately-typed value is still skipped correctly purely because
+// splitPositional now derives the classification from fs.VisitAll.
+func TestSplitPositionalDerivesValueFlagsFromTheFlagSet(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("workspace", ".", "")
+	fs.Bool("all", false, "")
+	fs.String("extra", "", "a brand-new value flag, not in any hand-maintained list")
+
+	positional, remaining := splitPositional(fs, []string{"--extra", "not-the-positional", "task", "--all"})
+	if positional != "task" {
+		t.Fatalf("got positional %q, want %q — the new value flag's argument must be skipped, not mistaken for the positional", positional, "task")
+	}
+	wantRemaining := []string{"--extra", "not-the-positional", "--all"}
+	if strings.Join(remaining, ",") != strings.Join(wantRemaining, ",") {
+		t.Fatalf("got remaining %v, want %v", remaining, wantRemaining)
+	}
+
+	// A boolean flag's own argument, by contrast, must never be skipped: it
+	// takes no separately-typed value, so the very next token is fair game
+	// as the positional.
+	positional2, _ := splitPositional(fs, []string{"--all", "task2"})
+	if positional2 != "task2" {
+		t.Fatalf("got positional %q, want %q — a boolean flag must not swallow the following token", positional2, "task2")
 	}
 }

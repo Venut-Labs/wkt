@@ -68,7 +68,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	// splitPositional extracts the one positional itself, by walking the
 	// flags, before fs.Parse ever runs, so every flag on both sides reaches
 	// it in one pass.
-	positional, rest := splitPositional(rest)
+	positional, rest := splitPositional(fs, rest)
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
@@ -285,18 +285,6 @@ func requireContainer(c container.C) error {
 	return nil
 }
 
-// valueFlags names wkt's flags that consume a separately-typed following
-// argument as their value, in both the single- and double-dash spelling Go's
-// flag package treats identically ("-workspace" and "--workspace" are the
-// same flag). Every other dash-prefixed token — a boolean flag, a
-// "--flag=value" token carrying its own value, or an unrecognised flag —
-// consumes only itself; splitPositional never needs to know which, since it
-// never inspects a flag's value as a positional candidate either way.
-var valueFlags = map[string]bool{
-	"-workspace": true, "--workspace": true,
-	"-repos": true, "--repos": true,
-}
-
 // splitPositional finds wkt's one positional argument (the task name)
 // wherever it falls among rest's flags — before them, after them, or split
 // between two of them — and returns it separately from every flag token, in
@@ -315,7 +303,23 @@ var valueFlags = map[string]bool{
 // on. See the round 3 regression this replaces: a single fs.Parse call left
 // a flag typed after the task name sitting unparsed in Args(), silently
 // keeping its zero value instead of erroring.
-func splitPositional(rest []string) (positional string, remaining []string) {
+//
+// Which flags consume a separately-typed value is derived from fs itself via
+// VisitAll, not hand-maintained: a flag is boolean iff its Value implements
+// the standard library's unexported-but-checkable "IsBoolFlag() bool"
+// convention (flag.Bool's Value does; flag.String's does not). A future flag
+// added to fs and forgotten here — the exact shape of a bug already fixed
+// once on this branch — now classifies itself correctly with no separate
+// list to keep in sync.
+func splitPositional(fs *flag.FlagSet, rest []string) (positional string, remaining []string) {
+	valueFlags := map[string]bool{}
+	fs.VisitAll(func(f *flag.Flag) {
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			return
+		}
+		valueFlags["-"+f.Name] = true
+		valueFlags["--"+f.Name] = true
+	})
 	for i := 0; i < len(rest); i++ {
 		tok := rest[i]
 		if !strings.HasPrefix(tok, "-") {
