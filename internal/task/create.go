@@ -220,7 +220,7 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 			rollback()
 			return state.Task{}, wkterr.New("WKT_WORKTREE_LOCK", "cannot lock the worktree").WithRepo(r.RelPath)
 		}
-		wtName, err := worktreeName(sp, r.WorktreePath)
+		wtName, err := worktreeName(r.WorktreePath)
 		if err != nil {
 			rollback()
 			return state.Task{}, wkterr.New("WKT_WORKTREE_NAME_UNRESOLVED",
@@ -255,26 +255,40 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 	return t, nil
 }
 
-// worktreeName reads back the admin directory git chose, which it derives from
-// the leaf basename and silently disambiguates (svc-a, svc-a1). repair cannot
-// work without it (spec §5.4), so an unresolved name is an error, not a
-// silently empty string persisted into state.
-func worktreeName(storePath, worktreePath string) (string, error) {
-	out, err := gitx.Run(storePath, "worktree", "list", "--porcelain")
+// worktreeName reads back the admin directory git actually chose, which it
+// derives from the leaf basename and silently disambiguates on collision
+// (svc-a, svc-a1). repair cannot work without it (spec §5.4), so an
+// unresolved name is an error, not a silently empty string persisted into
+// state.
+//
+// Two different tasks on the same repository collide by construction: both
+// task trees mirror the workspace shape, so both worktrees sit at a path
+// whose basename is the repository's own leaf name (".../feat-a/svc-a" and
+// ".../feat-b/svc-a"), even though git registers the second one under the
+// store as "svc-a1". filepath.Base(worktreePath) — or, equivalently,
+// filepath.Base of the *worktree path* reported by "git worktree list
+// --porcelain" — is therefore always "svc-a" for both, which is simply
+// wrong for the second task. The registration name has to be read back
+// from the worktree's own gitdir instead: "git -C <worktree> rev-parse
+// --git-dir" resolves to ".../store/<id>.git/worktrees/svc-a1", and its
+// basename is git's actual choice. Confirmed empirically against real git
+// before this fix: two worktrees added at paths that share a leaf basename
+// register as "svc-a" and "svc-a1" under the store, verified via both
+// "worktree list --porcelain" (which only ever reports the worktree
+// *path*, never the admin name) and each worktree's own ".git" gitdir
+// pointer.
+func worktreeName(worktreePath string) (string, error) {
+	gitDir, err := gitx.Run(worktreePath, "rev-parse", "--git-dir")
 	if err != nil {
 		return "", err
 	}
-	want, _ := paths.Canonical(worktreePath)
-	var current string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "worktree ") {
-			current = strings.TrimPrefix(line, "worktree ")
-			got, _ := paths.Canonical(current)
-			if got == want {
-				return filepath.Base(current), nil
-			}
-		}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktreePath, gitDir)
 	}
-	return "", wkterr.New("WKT_WORKTREE_NAME_UNRESOLVED", "no worktree registration matches the created worktree").
-		WithPath(worktreePath)
+	name := filepath.Base(filepath.Clean(gitDir))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "", wkterr.New("WKT_WORKTREE_NAME_UNRESOLVED", "cannot determine the store's worktree registration name").
+			WithPath(worktreePath)
+	}
+	return name, nil
 }

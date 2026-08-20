@@ -82,6 +82,45 @@ func TestCreateBuildsMirroredTreeOnOneBranch(t *testing.T) {
 	}
 }
 
+// TestCreateRecordsDistinctStoreWorktreeNamesOnCollision reproduces review
+// finding Important 6: two tasks selecting the same repository collide by
+// construction — every task tree mirrors the workspace shape, so both
+// worktrees sit at a path whose basename is the repository's own leaf name
+// (".../feat-a/svc-a" and ".../feat-b/svc-a"), even though git registers
+// the second one under the shared store disambiguated, as "svc-a1". The old
+// code took filepath.Base of the *worktree path* — always "svc-a" for
+// both — instead of reading back git's actual admin directory name, which
+// repair cannot work without (spec §5.4).
+func TestCreateRecordsDistinctStoreWorktreeNamesOnCollision(t *testing.T) {
+	c, entries := fixture(t)
+	taskA, err := Create(c, entries, "feat-a", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries2, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskB, err := Create(c, entries2, "feat-b", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nameA := taskA.Repos[0].StoreWorktreeName
+	nameB := taskB.Repos[0].StoreWorktreeName
+	if nameA != "svc-a" {
+		t.Fatalf("the first task must register under the plain leaf name, got %q", nameA)
+	}
+	if nameA == nameB {
+		t.Fatalf("two tasks colliding on one repository must record different store worktree registration names, both got %q", nameA)
+	}
+
+	sp := filepath.Join(c.StoreDir(), taskA.Repos[0].StoreID+".git")
+	if _, err := os.Stat(filepath.Join(sp, "worktrees", nameB)); err != nil {
+		t.Fatalf("the recorded name %q must be git's actual admin directory under the store: %v", nameB, err)
+	}
+}
+
 func TestCreateAbortsWholeSetWhenOneRepoHasADivergentBranch(t *testing.T) {
 	c, entries := fixture(t)
 	// docs already carries a branch of that name, pointing somewhere else.
