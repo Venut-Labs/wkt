@@ -34,12 +34,19 @@ func TestWalkFindsReposAtMixedDepths(t *testing.T) {
 	for _, e := range entries {
 		found[e.RelPath] = e.Kind
 	}
-	if found["services/svc-a"] != KindRepo {
-		t.Fatalf("services/svc-a not discovered as a repo: %v", found)
+	// Check services/svc-a exists and is a repo
+	if v, ok := found["services/svc-a"]; !ok {
+		t.Fatalf("services/svc-a not discovered: %v", found)
+	} else if v != KindRepo {
+		t.Fatalf("services/svc-a not classified as repo: %v", found)
 	}
-	if found["docs"] != KindRepo {
-		t.Fatalf("docs not discovered as a repo: %v", found)
+	// Check docs exists and is a repo
+	if v, ok := found["docs"]; !ok {
+		t.Fatalf("docs not discovered: %v", found)
+	} else if v != KindRepo {
+		t.Fatalf("docs not classified as repo: %v", found)
 	}
+	// Check notes is not reported
 	if _, ok := found["notes"]; ok {
 		t.Fatal("a plain directory must not be reported as a repository")
 	}
@@ -111,39 +118,6 @@ func TestWalkDoesNotSkipSiblingsAfterSymlink(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("zzz-repo not discovered after symlink: %v", entries)
-	}
-}
-
-func TestWalkFindsReposAtMixedDepthsBetter(t *testing.T) {
-	ws := t.TempDir()
-	gitInit(t, filepath.Join(ws, "services", "svc-a"))
-	gitInit(t, filepath.Join(ws, "docs"))
-	if err := os.MkdirAll(filepath.Join(ws, "notes"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := Walk(ws, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := map[string]Kind{}
-	for _, e := range entries {
-		found[e.RelPath] = e.Kind
-	}
-	// Check services/svc-a exists and is a repo
-	if v, ok := found["services/svc-a"]; !ok {
-		t.Fatalf("services/svc-a not discovered: %v", found)
-	} else if v != KindRepo {
-		t.Fatalf("services/svc-a not classified as repo: %v", found)
-	}
-	// Check docs exists and is a repo
-	if v, ok := found["docs"]; !ok {
-		t.Fatalf("docs not discovered: %v", found)
-	} else if v != KindRepo {
-		t.Fatalf("docs not classified as repo: %v", found)
-	}
-	// Check notes is not reported
-	if _, ok := found["notes"]; ok {
-		t.Fatal("a plain directory must not be reported as a repository")
 	}
 }
 
