@@ -1,0 +1,8 @@
+# Agent scratch: .claude/worktrees holds full working copies of this repo
+.claude/
+
+# Local reference material, not part of the product
+reffernces/
+
+# Built binary
+/wkt
