@@ -141,3 +141,28 @@ func TestCreateRollsBackAlreadyCreatedRepositoriesOnMidPhaseTwoFailure(t *testin
 		t.Fatalf("rollback must remove the base pin already written for the first repository, found %q", out)
 	}
 }
+
+// TestCreateRemovesBasePinWhenStoreEnsureFailsAfterWritingIt guards the base
+// pin specifically: store.Ensure writes refs/wkt/base/<task> into the
+// *workspace* repository as its unconditional first action, even when it
+// then fails on a later step (here: cloning into an unwritable store
+// directory). The pin undo must be registered before Ensure runs, not after
+// it returns, or a failed create leaves a stray ref behind in the
+// developer's own repository forever.
+func TestCreateRemovesBasePinWhenStoreEnsureFailsAfterWritingIt(t *testing.T) {
+	c, entries := fixture(t)
+	if err := os.Chmod(c.StoreDir(), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(c.StoreDir(), 0o700) })
+
+	_, err := Create(c, entries, "feat-42", []string{"services/svc-a"})
+	if err == nil {
+		t.Fatal("create must fail when the store directory cannot be written to")
+	}
+
+	svcAbs := filepath.Join(c.Workspace, "services", "svc-a")
+	if out := g(t, svcAbs, "for-each-ref", "refs/wkt/base/feat-42"); len(out) != 0 {
+		t.Fatalf("rollback must remove the base pin even when store.Ensure fails after writing it, found %q", out)
+	}
+}

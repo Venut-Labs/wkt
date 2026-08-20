@@ -150,6 +150,16 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 
 	for i := range repos {
 		r := &repos[i]
+		// store.Ensure writes the base pin into the workspace repository as its
+		// unconditional first internal action — even on the idempotent
+		// store-already-exists path, and even if it then fails later (e.g.
+		// cloning into the store). The undo must therefore be registered
+		// before calling it, not after it returns: deleting a ref that was
+		// never written is a no-op in git, so registering early is safe, and
+		// the undo only ever runs on rollback.
+		repoAbs, pin := r.AbsPath, r.BasePinRef
+		undos = append(undos, func() { _, _ = gitx.Run(repoAbs, "update-ref", "-d", pin) })
+
 		sp, err := store.Ensure(c.StoreDir(), r.AbsPath, r.RelPath, name, r.BaseSHA)
 		if err != nil {
 			rollback()
@@ -161,8 +171,6 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 				return state.Task{}, err
 			}
 		}
-		repoAbs, pin := r.AbsPath, r.BasePinRef
-		undos = append(undos, func() { _, _ = gitx.Run(repoAbs, "update-ref", "-d", pin) })
 
 		if err := os.MkdirAll(filepath.Dir(r.WorktreePath), 0o755); err != nil {
 			rollback()
@@ -186,7 +194,14 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 			rollback()
 			return state.Task{}, wkterr.New("WKT_WORKTREE_LOCK", "cannot lock the worktree").WithRepo(r.RelPath)
 		}
-		r.StoreWorktreeName = worktreeName(sp, r.WorktreePath)
+		wtName, err := worktreeName(sp, r.WorktreePath)
+		if err != nil {
+			rollback()
+			return state.Task{}, wkterr.New("WKT_WORKTREE_NAME_UNRESOLVED",
+				"cannot determine the store's worktree registration name; repair cannot work without it").
+				WithRepo(r.RelPath).WithPath(r.WorktreePath)
+		}
+		r.StoreWorktreeName = wtName
 	}
 
 	plan, err := tree.PlanFor(c.Workspace, entries, selected)
@@ -216,11 +231,12 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 
 // worktreeName reads back the admin directory git chose, which it derives from
 // the leaf basename and silently disambiguates (svc-a, svc-a1). repair cannot
-// work without it (spec §5.4).
-func worktreeName(storePath, worktreePath string) string {
+// work without it (spec §5.4), so an unresolved name is an error, not a
+// silently empty string persisted into state.
+func worktreeName(storePath, worktreePath string) (string, error) {
 	out, err := gitx.Run(storePath, "worktree", "list", "--porcelain")
 	if err != nil {
-		return ""
+		return "", err
 	}
 	want, _ := paths.Canonical(worktreePath)
 	var current string
@@ -229,9 +245,10 @@ func worktreeName(storePath, worktreePath string) string {
 			current = strings.TrimPrefix(line, "worktree ")
 			got, _ := paths.Canonical(current)
 			if got == want {
-				return filepath.Base(current)
+				return filepath.Base(current), nil
 			}
 		}
 	}
-	return ""
+	return "", wkterr.New("WKT_WORKTREE_NAME_UNRESOLVED", "no worktree registration matches the created worktree").
+		WithPath(worktreePath)
 }
