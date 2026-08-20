@@ -130,6 +130,22 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 		return state.Task{}, wkterr.New("WKT_TASK_EXISTS", "task already exists").
 			WithFound(name).WithRemedy("wkt path "+name, "wkt rm "+name)
 	}
+
+	treeRoot := c.TreePath(name)
+	// os.MkdirAll succeeds silently on a directory that already exists, and
+	// the rollback undo below then os.RemoveAll's the whole thing on any
+	// later failure — destroying content wkt never created if that
+	// directory was already there for an unrelated reason. Refusing up
+	// front is simpler than tracking whether MkdirAll itself created the
+	// directory, and it also stops a stale leftover tree from being
+	// silently adopted.
+	if _, err := os.Stat(treeRoot); err == nil {
+		return state.Task{}, wkterr.New("WKT_TREE_EXISTS", "the task tree directory already exists").
+			WithPath(treeRoot).WithRemedy("wkt status "+name, "wkt rm "+name)
+	} else if !os.IsNotExist(err) {
+		return state.Task{}, wkterr.New("WKT_CHECK_FAILED", "cannot check the task tree directory").WithPath(treeRoot)
+	}
+
 	repos, err := Validate(c, entries, name, selected)
 	if err != nil {
 		return state.Task{}, err
@@ -142,7 +158,6 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 		}
 	}
 
-	treeRoot := c.TreePath(name)
 	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
 		return state.Task{}, wkterr.New("WKT_TREE_BUILD", "cannot create the task tree").WithPath(treeRoot)
 	}

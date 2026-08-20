@@ -1,6 +1,7 @@
 package task
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"wkt/internal/container"
 	"wkt/internal/discover"
 	"wkt/internal/store"
+	"wkt/internal/wkterr"
 )
 
 func g(t *testing.T, dir string, args ...string) string {
@@ -103,30 +105,35 @@ func TestCreateAbortsWholeSetWhenOneRepoHasADivergentBranch(t *testing.T) {
 // gap the other two tests leave open: a divergent branch is caught by
 // Validate before phase two ever starts, so it never exercises the rollback
 // undo stack — a no-op rollback passes it just as well as a working one.
-// Here the conflict (a pre-existing, non-empty path at the second
-// repository's worktree destination) is invisible to Validate and can only
-// surface once "git worktree add" actually runs, after the first
-// repository's store worktree, branch and base pin already exist. Only a
-// real rollback removes them.
+// Here the conflict is invisible to Validate and can only surface once
+// phase two actually runs, after the first repository's store worktree,
+// branch and base pin already exist. Only a real rollback removes them.
+//
+// The conflict is planted at the *second repository's store path*, not at
+// its worktree destination under the tree root: review finding Important 5
+// (fixed in the same pass as this test's adjustment) makes Create refuse up
+// front whenever trees/<name> already exists, which is exactly what
+// pre-populating a worktree destination under treeRoot would trip before
+// Create ever reached phase two. A plain file sitting where the bare clone
+// needs to go is just as invisible to Validate and just as unreachable
+// until phase two runs.
 func TestCreateRollsBackAlreadyCreatedRepositoriesOnMidPhaseTwoFailure(t *testing.T) {
 	c, entries := fixture(t)
 
 	treeRoot := c.TreePath("feat-42")
-	blocked := filepath.Join(treeRoot, "docs")
-	if err := os.MkdirAll(blocked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(blocked, "stray.txt"), []byte("x\n"), 0o644); err != nil {
+	docsAbs := filepath.Join(c.Workspace, "docs")
+	docsStore := filepath.Join(c.StoreDir(), store.ID("docs", docsAbs)+".git")
+	if err := os.WriteFile(docsStore, []byte("blocking"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	_, err := Create(c, entries, "feat-42", []string{"services/svc-a", "docs"})
 	if err == nil {
-		t.Fatal("create must fail when a repository's worktree destination is blocked")
+		t.Fatal("create must fail when a repository's store cannot be created")
 	}
 
 	if _, statErr := os.Stat(treeRoot); !os.IsNotExist(statErr) {
-		t.Fatal("a refused create must leave no tree behind, including the blocked path we injected")
+		t.Fatal("a refused create must leave no tree behind")
 	}
 
 	svcAbs := filepath.Join(c.Workspace, "services", "svc-a")
@@ -230,5 +237,55 @@ func TestCreateRollsBackBranchWhenWorktreeAddFails(t *testing.T) {
 	}
 	if _, err := Create(c, entries3, "feat-leak", []string{"services/svc-a"}); err != nil {
 		t.Fatalf("a name freed by a failed create's rollback must be reusable, got: %v", err)
+	}
+}
+
+// TestCreateRefusesAndDoesNotTouchAPreExistingTreeDirectory reproduces
+// review finding Important 5's exact scenario: os.MkdirAll succeeds
+// silently on a directory that already exists, and the old code then
+// registered an unconditional os.RemoveAll(treeRoot) rollback undo
+// regardless — so a pre-existing trees/<name>/ with unrelated content (a
+// stale leftover, or simply a name collision with something that isn't a
+// wkt tree at all) was destroyed once create failed for any reason.
+//
+// The second repository's own worktree destination is pre-populated too
+// (the same conflict TestCreateRollsBackAlreadyCreatedRepositoriesOnMidPhaseTwoFailure
+// used before it was adjusted for this same finding), so that against the
+// pre-fix code this doesn't merely fail to refuse: phase two runs, the
+// first repository's store worktree, branch and base pin all get created,
+// the second repository's "worktree add" then fails on the pre-existing
+// conflict, and the unconditional rollback os.RemoveAll(treeRoot) destroys
+// "unrelated.txt" along with everything else. The fix must refuse before
+// any of that happens at all.
+func TestCreateRefusesAndDoesNotTouchAPreExistingTreeDirectory(t *testing.T) {
+	c, entries := fixture(t)
+
+	treeRoot := c.TreePath("feat-preexisting")
+	blocked := filepath.Join(treeRoot, "docs")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "stray.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(treeRoot, "unrelated.txt")
+	if err := os.WriteFile(unrelated, []byte("not wkt's to touch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Create(c, entries, "feat-preexisting", []string{"services/svc-a", "docs"})
+	if err == nil {
+		t.Fatal("create must refuse when the task tree directory already exists")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) || e.Code != "WKT_TREE_EXISTS" {
+		t.Fatalf("expected WKT_TREE_EXISTS, got %v", err)
+	}
+	if _, statErr := os.Stat(unrelated); statErr != nil {
+		t.Fatal("a refused create must never delete content it did not create")
+	}
+	svcAbs := filepath.Join(c.Workspace, "services", "svc-a")
+	if out := g(t, svcAbs, "for-each-ref", "refs/wkt/base/feat-preexisting"); len(out) != 0 {
+		t.Fatalf("refusing up front must mean nothing was ever created for either repository, found pin %q", out)
 	}
 }
