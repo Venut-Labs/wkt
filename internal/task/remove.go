@@ -369,6 +369,29 @@ func Remove(c container.C, name string, force bool) error {
 	if err != nil {
 		return err
 	}
+
+	treeRoot := c.TreePath(name)
+	staged := filepath.Join(c.StagingDir(), name)
+
+	// A tree that is simply gone cannot be preflighted — there is nothing
+	// left on disk for a blocker to name — and the old behaviour tried
+	// anyway: Preflight emitted a blocking WKT_WORKTREE_MISSING per
+	// repository, so plain "rm" refused, and "--force" then died at
+	// os.Rename(treeRoot, staged) with ENOENT, reported as WKT_STAGING with
+	// a remedy about filesystems that had nothing to do with the cause.
+	// With no "doctor" in this plan, that left the task permanently
+	// unremovable: the state file, the base pin in the workspace repository
+	// and the store branch all survived forever, and the name could never
+	// be reused. Skip the fence entirely and go straight to store and state
+	// cleanup — finishRemove's own os.RemoveAll(staged) is a no-op when
+	// staging/<name> does not exist, and resumes an incomplete delete
+	// (test/05_staging_fence.sh deliberately produces exactly that state)
+	// when it does: that deletion was already authorised by the --force
+	// that performed the original move, so it does not need re-authorising.
+	if _, statErr := os.Stat(treeRoot); os.IsNotExist(statErr) {
+		return finishRemove(c, t, name, staged)
+	}
+
 	all, err := Preflight(c, t)
 	if err != nil {
 		return err
@@ -406,8 +429,6 @@ func Remove(c container.C, name string, force bool) error {
 		return e
 	}
 
-	treeRoot := c.TreePath(name)
-	staged := filepath.Join(c.StagingDir(), name)
 	if err := os.MkdirAll(c.StagingDir(), 0o700); err != nil {
 		return wkterr.New("WKT_STAGING", "cannot create the staging directory").WithPath(c.StagingDir())
 	}
@@ -428,6 +449,17 @@ func Remove(c container.C, name string, force bool) error {
 			WithRemedy(remedy)
 	}
 
+	return finishRemove(c, t, name, staged)
+}
+
+// finishRemove does the git-side cleanup (unlock, prune, delete the task
+// branch, delete the base pin from the workspace repository) and removes
+// the task's state, for every path that reaches it: a normal removal just
+// past the staging fence, and Remove's missing-tree shortcut above (where
+// staged may or may not exist — os.RemoveAll is a no-op on a path that
+// isn't there, so this same call resumes an interrupted delete without a
+// separate branch for that case).
+func finishRemove(c container.C, t state.Task, name, staged string) error {
 	for _, r := range t.Repos {
 		sp := filepath.Join(c.StoreDir(), r.StoreID+".git")
 		_, _ = gitx.Run(sp, "worktree", "unlock", r.WorktreePath)

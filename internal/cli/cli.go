@@ -178,9 +178,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		treePath := c.TreePath(t.Name)
 		if _, statErr := os.Stat(treePath); statErr != nil {
 			if os.IsNotExist(statErr) {
+				// "wkt rm <task> --force" used to be the advice here, but a
+				// missing tree can never reach the staging fence --force
+				// gates: Remove now goes straight to store/state cleanup
+				// for a missing tree, so plain "wkt rm <task>" is both
+				// sufficient and the honest remedy — there is nothing left
+				// to force through.
 				e := wkterr.New("WKT_TREE_MISSING", "task state exists but its tree is missing from disk").
 					WithPath(treePath).
-					WithRemedy("wkt status "+positional, "wkt rm "+positional+" --force")
+					WithRemedy("wkt status "+positional, "wkt rm "+positional)
 				return fail(stderr, e)
 			}
 			return fail(stderr, wkterr.New("WKT_CHECK_FAILED", "cannot verify the tree").

@@ -737,3 +737,84 @@ func TestRemoveRefusesOnFileInNewSubdirectoryOfTreeRoot(t *testing.T) {
 		t.Fatalf("a clean tree must remove once the untracked content is gone: %v", err)
 	}
 }
+
+// --- Review finding Important 2: a task whose tree is missing could never
+// be removed. Preflight blocked with WKT_WORKTREE_MISSING, so plain "rm"
+// refused; "--force" then died at os.Rename(treeRoot, staged) with ENOENT,
+// reported as WKT_STAGING with a remedy about filesystems that had nothing
+// to do with the cause. With no "doctor" in this plan, that left the state
+// file, the base pin and the store branch behind forever, and the name
+// permanently unusable.
+
+func TestRemoveSucceedsWhenTheTreeWasDeletedByHand(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-hand-deleted", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(c.TreePath(task.Name)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain "rm", no --force: there is nothing left on disk to fence or to
+	// force through, so this must succeed on the first, unforced call.
+	if err := Remove(c, "feat-hand-deleted", false); err != nil {
+		t.Fatalf("removing a task whose tree was deleted by hand must succeed: %v", err)
+	}
+	if _, err := state.Load(c.StateDir(), "feat-hand-deleted"); err == nil {
+		t.Fatal("the task's state file must be gone")
+	}
+
+	docsAbs := filepath.Join(c.Workspace, "docs")
+	if out := g(t, docsAbs, "for-each-ref", task.Repos[0].BasePinRef); len(out) != 0 {
+		t.Fatalf("the base pin must be removed from the workspace repository, found %q", out)
+	}
+
+	entries2, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(c, entries2, "feat-hand-deleted", []string{"docs"}); err != nil {
+		t.Fatalf("a name freed by removing a hand-deleted tree must be reusable, got: %v", err)
+	}
+}
+
+// TestRemoveResumesFromStagingWhenTheTreeWasAlreadyMovedButNotFullyDeleted
+// reproduces the exact state test/05_staging_fence.sh deliberately
+// produces: a previous "--force" run moved the tree into staging/ (the
+// fence) but could not finish deleting it (there, a locked subtree; here,
+// simulated directly by moving the tree by hand). The tree root is gone,
+// staging/<name> is not — Remove must resume the delete from there rather
+// than trying, and failing, to fence a tree that is no longer at its
+// original path.
+func TestRemoveResumesFromStagingWhenTheTreeWasAlreadyMovedButNotFullyDeleted(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-resume", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := task.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, "scratch.txt"), []byte("uncommitted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	staged := filepath.Join(c.StagingDir(), "feat-resume")
+	if err := os.MkdirAll(c.StagingDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(c.TreePath("feat-resume"), staged); err != nil {
+		t.Fatal(err)
+	}
+
+	// No --force: the deletion this resumes was already authorised by
+	// whatever produced the staged-but-undeleted state in the first place.
+	if err := Remove(c, "feat-resume", false); err != nil {
+		t.Fatalf("removal must resume from staging rather than dying on a missing tree root: %v", err)
+	}
+	if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
+		t.Fatal("staging must be fully cleared once removal resumes and completes")
+	}
+	if _, err := state.Load(c.StateDir(), "feat-resume"); err == nil {
+		t.Fatal("the task's state file must be gone")
+	}
+}
