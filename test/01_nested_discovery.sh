@@ -16,4 +16,6 @@ for r in services/svc-a services/svc-b docs shared; do
 done
 assert_file "non-git directory carried" "$TD/notes"
 assert_file "loose file carried" "$TD/CONVENTIONS.md"
+assert_eq "copied loose file matches the workspace original byte for byte" \
+  "$(cat "$TD/CONVENTIONS.md")" "$(cat "$WS/CONVENTIONS.md")"
 summary 01
