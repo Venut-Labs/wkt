@@ -26,7 +26,7 @@ const usage = `wkt — one task, one branch, many repositories
   wkt init   [--workspace DIR] [--dry-run]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
   wkt path   TASK [--workspace DIR]
-  wkt status [TASK] [--workspace DIR] [--json]
+  wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
 `
 
@@ -55,12 +55,22 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	force := fs.Bool("force", false, "remove even though work would be lost")
 	dryRun := fs.Bool("dry-run", false, "report without writing anything")
 
+	// The task name may be typed before its flags ("new feat-42 --all") or
+	// after them ("new --all feat-42"); Go's flag.Parse only ever consumes a
+	// run of flags up to the first non-flag token and then stops for good,
+	// so neither a single Parse call nor a single manual strip handles both
+	// orders on its own. Strip a leading positional first, if there is one
+	// (order one); otherwise parse normally and take whatever positional
+	// Parse left behind in Args() (order two).
 	var positional string
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		positional, rest = rest[0], rest[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
 		return 2
+	}
+	if positional == "" && fs.NArg() > 0 {
+		positional = fs.Arg(0)
 	}
 
 	c, err := container.Locate(*ws)
@@ -70,6 +80,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 	switch cmd {
 	case "init":
+		if info, statErr := os.Stat(c.Workspace); statErr != nil || !info.IsDir() {
+			e := wkterr.New("WKT_NO_WORKSPACE", "the workspace does not exist or is not a directory").
+				WithPath(c.Workspace)
+			if statErr != nil {
+				e = e.WithFound(statErr.Error())
+			}
+			return fail(stderr, e)
+		}
 		entries, err := discover.Walk(c.Workspace, 4)
 		if err != nil {
 			return fail(stderr, err)
@@ -81,10 +99,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			}
 			return fail(stderr, e)
 		}
+		repoCount := 0
 		for _, e := range entries {
 			if e.Kind == discover.KindRepo {
 				fmt.Fprintln(stdout, e.RelPath)
+				repoCount++
 			}
+		}
+		if repoCount == 0 {
+			return fail(stderr, wkterr.New("WKT_NO_REPOS", "no repositories were found under the workspace").
+				WithPath(c.Workspace).
+				WithRemedy("check that --workspace points at the intended directory"))
 		}
 		if *dryRun {
 			return 0
@@ -98,6 +123,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if positional == "" {
 			fmt.Fprint(stderr, usage)
 			return 2
+		}
+		// A container that init already built is required from here on;
+		// without this check, an uninitialised workspace fails on the lock
+		// file it cannot open (WKT_CONTAINER_UNUSABLE, exit 1) instead of
+		// the documented exit 4.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
 		}
 		release, err := container.Lock(c)
 		if err != nil {
@@ -117,6 +149,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "path":
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		// Without this, a task looked up in a container that was never
+		// created silently reads as "no such task" (WKT_NO_TASK, exit 1)
+		// rather than the documented exit 4 for a missing container.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
 		t, err := state.Load(c.StateDir(), positional)
 		if err != nil {
 			return fail(stderr, err)
@@ -139,6 +181,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "status":
+		// status takes an optional task name, so there is no usage error to
+		// check first; the container check is the first thing done. Without
+		// it, an uninitialised workspace's absent state directory reads as
+		// "zero tasks" and status silently exits 0 instead of the
+		// documented exit 4.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
 		names, _ := state.List(c.StateDir())
 		if positional != "" {
 			names = []string{positional}
@@ -179,6 +229,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "rm":
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		// Without this, an uninitialised workspace fails on the lock file
+		// it cannot open (WKT_CONTAINER_UNUSABLE, exit 1) instead of the
+		// documented exit 4.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
 		release, err := container.Lock(c)
 		if err != nil {
 			return fail(stderr, err)
@@ -192,6 +252,22 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprint(stderr, usage)
 	return 2
+}
+
+// requireContainer reports whether init has already built the container
+// this workspace resolves to. Locate only computes where the container
+// would live; it never checks whether Create has actually run there, so
+// every command that depends on the container's directories existing must
+// check for itself or fail with whatever unrelated error it happens to hit
+// first (an unopenable lock file, a state directory that silently yields no
+// tasks).
+func requireContainer(c container.C) error {
+	if info, err := os.Stat(c.Root); err != nil || !info.IsDir() {
+		return wkterr.New("WKT_NO_CONTAINER", "no container for this workspace").
+			WithPath(c.Root).
+			WithRemedy("wkt init --workspace " + c.Workspace)
+	}
+	return nil
 }
 
 func selection(entries []discover.Entry, repos string, all bool) []string {

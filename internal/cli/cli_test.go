@@ -318,3 +318,165 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		t.Fatalf("an unparsable flag set exited %d, want 2", code)
 	}
 }
+
+// --- review round 2 ---
+
+// TestPathAndRmRequireATaskNameExitTwo is minor fix 4: an empty task name on
+// path or rm is a usage error, exactly like new, not whatever incidental
+// error state.Load or task.Remove happens to produce for an empty name.
+func TestPathAndRmRequireATaskNameExitTwo(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "svc-a"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"path", "--workspace", ws}, &out, &errb); code != 2 {
+		t.Fatalf("path with no task name exited %d, want 2", code)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"rm", "--workspace", ws}, &out, &errb); code != 2 {
+		t.Fatalf("rm with no task name exited %d, want 2", code)
+	}
+}
+
+// TestUninitialisedContainerExitsFour is Important fix 1: new, path, status
+// and rm against a workspace that was never `wkt init`-ed must all exit 4,
+// not whatever incidental error each command happens to hit first. This is
+// an integration test against real commands, not just a check on fail()'s
+// mapping table — it would have caught the original bug (status silently
+// exiting 0, new/path/rm exiting 1) that the mapping-only test could not.
+func TestUninitialisedContainerExitsFour(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "svc-a"))
+	// Deliberately no "init" call.
+
+	cases := [][]string{
+		{"new", "t1", "--workspace", ws, "--all"},
+		{"path", "t1", "--workspace", ws},
+		{"status", "--workspace", ws},
+		{"rm", "t1", "--workspace", ws},
+	}
+	for _, args := range cases {
+		var out, errb bytes.Buffer
+		code := Run(args, &out, &errb)
+		if code != 4 {
+			t.Errorf("%v against an uninitialised container exited %d, want 4: stdout=%q stderr=%q",
+				args, code, out.String(), errb.String())
+		}
+		if !strings.Contains(errb.String(), "WKT_NO_CONTAINER") {
+			t.Errorf("%v: stderr must report WKT_NO_CONTAINER, got %q", args, errb.String())
+		}
+	}
+}
+
+// TestInitRefusesNonexistentWorkspace and TestInitRefusesWorkspaceWithNoRepos
+// are Important fix 2: init must not silently succeed and create an empty
+// container for a workspace that plainly isn't one — a typo in --workspace
+// looks exactly like success otherwise, since discover.Walk swallows a
+// root-level walk error and simply returns zero entries.
+func TestInitRefusesNonexistentWorkspace(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "does-not-exist")
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"init", "--workspace", ws}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("init on a nonexistent workspace exited 0, want a typed failure; stdout=%q", out.String())
+	}
+	if _, err := os.Stat(ws + ".worktrees"); !os.IsNotExist(err) {
+		t.Fatal("init must not create a container for a workspace that does not exist")
+	}
+}
+
+func TestInitRefusesWorkspaceWithNoRepos(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"init", "--workspace", ws}, &out, &errb)
+	if code == 0 {
+		t.Fatalf("init on a workspace with zero repositories exited 0, want a typed failure; stdout=%q", out.String())
+	}
+	if _, err := os.Stat(ws + ".worktrees"); !os.IsNotExist(err) {
+		t.Fatal("init must not create a container for a workspace with nothing to materialise")
+	}
+}
+
+// TestNewAcceptsFlagsBeforeOrAfterTheTaskName is Important fix 3: the task
+// name may be typed before its flags or after them. Each subtest checks the
+// flags actually took effect (a materialised tree under the given
+// --workspace, a repo selected by --all), not merely that the exit code was
+// 0 — a version that silently ignored --workspace and operated on "." could
+// still exit 0 while doing the wrong thing entirely.
+func TestNewAcceptsFlagsBeforeOrAfterTheTaskName(t *testing.T) {
+	positionalFirst := func(t *testing.T, ws, task string) {
+		var out, errb bytes.Buffer
+		if code := Run([]string{"new", task, "--workspace", ws, "--all"}, &out, &errb); code != 0 {
+			t.Fatalf("positional-first order exited %d: %s", code, errb.String())
+		}
+	}
+	flagsFirst := func(t *testing.T, ws, task string) {
+		var out, errb bytes.Buffer
+		if code := Run([]string{"new", "--all", "--workspace", ws, task}, &out, &errb); code != 0 {
+			t.Fatalf("flags-first order exited %d: %s", code, errb.String())
+		}
+	}
+
+	for name, create := range map[string]func(t *testing.T, ws, task string){
+		"positional-first": positionalFirst,
+		"flags-first":      flagsFirst,
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			ws := filepath.Join(base, "ws")
+			seedRepo(t, filepath.Join(ws, "svc-a"))
+			var out, errb bytes.Buffer
+			if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+				t.Fatalf("init exited %d: %s", code, errb.String())
+			}
+
+			create(t, ws, "t-order")
+
+			out.Reset()
+			errb.Reset()
+			if code := Run([]string{"path", "t-order", "--workspace", ws}, &out, &errb); code != 0 {
+				t.Fatalf("path exited %d: %s", code, errb.String())
+			}
+			// Proves both flags actually took effect, not merely that the
+			// exit code was 0: if --workspace were silently ignored (falling
+			// back to "."), svc-a — created only under this test's isolated
+			// tempdir — would not exist under whatever tree got built, and
+			// if --all were ignored, no repository would be selected at all.
+			treePath := strings.TrimSpace(out.String())
+			if _, err := os.Stat(filepath.Join(treePath, "svc-a")); err != nil {
+				t.Fatalf("--workspace and/or --all was not honoured (svc-a missing from %q): %v", treePath, err)
+			}
+		})
+	}
+}
+
+// TestUsageStringDoesNotAdvertiseJSON is minor fix 5: --json was advertised
+// but never implemented as a flag on any command, so passing it fails with
+// "flag provided but not defined". The usage text must not promise it.
+func TestUsageStringDoesNotAdvertiseJSON(t *testing.T) {
+	if strings.Contains(usage, "json") {
+		t.Fatalf("usage text still advertises --json: %q", usage)
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"status", "--json"}, &out, &errb); code != 2 {
+		t.Fatalf("--json exited %d, want 2 (an unrecognised flag is a usage error)", code)
+	}
+}
