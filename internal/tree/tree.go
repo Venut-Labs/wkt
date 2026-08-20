@@ -47,29 +47,70 @@ func PlanFor(workspace string, entries []discover.Entry, selected []string) (Pla
 			return Plan{}, wkterr.New("WKT_NO_SUCH_REPO", "not a discovered repository").WithRepo(s)
 		}
 	}
-	// Ancestors of anything we materialise must stay real directories.
+	// Directories on the path to anything the tree places — a materialised
+	// worktree, or a back-filled repository's own leaf symlink — must stay
+	// real directories. A back-filled repo is a symlink only at its own
+	// position; every ancestor above it still has to be real, or the whole
+	// ancestor chain would collapse into one whole-directory link and bury
+	// the repository (and any of its siblings) inside it.
 	ancestors := map[string]bool{}
-	for _, m := range p.Materialise {
-		for d := filepath.Dir(m); d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
+	addAncestors := func(rel string) {
+		for d := filepath.Dir(rel); d != "." && d != string(filepath.Separator); d = filepath.Dir(d) {
 			ancestors[d] = true
 		}
 	}
-	top, err := os.ReadDir(workspace)
+	for _, m := range p.Materialise {
+		addAncestors(m)
+	}
+	for _, b := range p.BackFill {
+		addAncestors(b)
+	}
+	if err := planDir(workspace, "", repoPaths, ancestors, &p); err != nil {
+		return Plan{}, err
+	}
+	return p, nil
+}
+
+// planDir buckets the children of the workspace-relative directory dirRel
+// (dirRel == "" for the workspace root). It recurses only into directories
+// that lie on the path to something the tree places (ancestors) — anything
+// else is a leaf: a repository already bucketed by the caller, a directory
+// to link whole, or a file to copy. This is what keeps content that lives
+// alongside an ancestor (a sibling directory or loose file inside a
+// materialised or back-filled repo's parent) from silently falling out of
+// the plan.
+func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *Plan) error {
+	abs := filepath.Join(workspace, dirRel)
+	top, err := os.ReadDir(abs)
 	if err != nil {
-		return Plan{}, wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot read the workspace").WithPath(workspace)
+		return wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot read the workspace").WithPath(abs)
 	}
 	for _, e := range top {
 		name := e.Name()
-		if name == ".claude" || name == ".wkt" || repoPaths[name] || ancestors[name] {
+		if dirRel == "" && (name == ".claude" || name == ".wkt") {
 			continue
 		}
+		rel := name
+		if dirRel != "" {
+			rel = filepath.Join(dirRel, name)
+		}
+		if repoPaths[rel] {
+			continue // already bucketed into Materialise or BackFill
+		}
+		if ancestors[rel] {
+			if err := planDir(workspace, rel, repoPaths, ancestors, p); err != nil {
+				return err
+			}
+			continue
+		}
+		relSlash := filepath.ToSlash(rel)
 		if e.IsDir() {
-			p.LinkDirs = append(p.LinkDirs, name)
+			p.LinkDirs = append(p.LinkDirs, relSlash)
 		} else {
-			p.CopyFiles = append(p.CopyFiles, name)
+			p.CopyFiles = append(p.CopyFiles, relSlash)
 		}
 	}
-	return p, nil
+	return nil
 }
 
 func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
@@ -80,8 +121,32 @@ func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 			return wkterr.New("WKT_TREE_BUILD", "cannot create an ancestor directory").WithPath(dst)
 		}
 		src := filepath.Join(workspace, rel) // absolute target (spec §5.3 rule 3)
-		if err := os.Symlink(src, dst); err != nil && !os.IsExist(err) {
-			return wkterr.New("WKT_TREE_BUILD", "cannot create a link slot").WithPath(dst).WithFound(err.Error())
+		switch info, err := os.Lstat(dst); {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			// Already a symlink. Only a match on the exact intended target is
+			// idempotent; anything else is a conflict, not a silent overwrite.
+			actual, rerr := os.Readlink(dst)
+			if rerr != nil {
+				return wkterr.New("WKT_TREE_BUILD", "cannot read an existing link slot").WithPath(dst).WithFound(rerr.Error())
+			}
+			if actual != src {
+				return wkterr.New("WKT_TREE_CONFLICT", "tree path already exists and is not the expected link").
+					WithPath(dst).WithExpected(src).WithFound(actual)
+			}
+		case err == nil:
+			// Exists and is not a symlink at all: never silently swallowed.
+			kind := "a file"
+			if info.IsDir() {
+				kind = "a directory"
+			}
+			return wkterr.New("WKT_TREE_CONFLICT", "tree path already exists and is not the expected link").
+				WithPath(dst).WithExpected(src).WithFound(kind)
+		case os.IsNotExist(err):
+			if err := os.Symlink(src, dst); err != nil {
+				return wkterr.New("WKT_TREE_BUILD", "cannot create a link slot").WithPath(dst).WithFound(err.Error())
+			}
+		default:
+			return wkterr.New("WKT_TREE_BUILD", "cannot inspect a tree path").WithPath(dst).WithFound(err.Error())
 		}
 		slots = append(slots, state.LinkSlot{RelPath: rel, Target: src, Type: "symlink"})
 		return nil
@@ -104,6 +169,10 @@ func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 }
 
 func copyFile(src, dst string) (string, error) {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return "", wkterr.New("WKT_TREE_BUILD", "cannot stat a workspace file").WithPath(src)
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return "", wkterr.New("WKT_TREE_BUILD", "cannot read a workspace file").WithPath(src)
@@ -112,7 +181,7 @@ func copyFile(src, dst string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return "", wkterr.New("WKT_TREE_BUILD", "cannot create a directory").WithPath(dst)
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode().Perm())
 	if err != nil {
 		return "", wkterr.New("WKT_TREE_BUILD", "cannot write into the tree").WithPath(dst)
 	}
@@ -120,6 +189,12 @@ func copyFile(src, dst string) (string, error) {
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(out, h), in); err != nil {
 		return "", wkterr.New("WKT_TREE_BUILD", "cannot copy a workspace file").WithPath(dst)
+	}
+	// OpenFile's mode is subject to umask; chmod explicitly so the copy's
+	// permissions (notably the execute bit on scripts and hooks) match the
+	// source exactly, not whatever the process umask allowed through.
+	if err := out.Chmod(srcInfo.Mode().Perm()); err != nil {
+		return "", wkterr.New("WKT_TREE_BUILD", "cannot set permissions on a copied file").WithPath(dst)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

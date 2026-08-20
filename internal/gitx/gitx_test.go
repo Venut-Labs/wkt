@@ -61,9 +61,9 @@ func TestParseVersion(t *testing.T) {
 		{"git version 2.29.0", 2, 29, false},
 		{"git version 2.29", 2, 29, false},
 		{"git version 3.0.0", 3, 0, false},
-		{"git version", 0, 0, true},           // not enough fields
-		{"git version abc", 0, 0, true},       // invalid major
-		{"git version 2.abc.0", 2, 0, false},  // invalid minor defaults to 0
+		{"git version", 0, 0, true},          // not enough fields
+		{"git version abc", 0, 0, true},      // invalid major
+		{"git version 2.abc.0", 2, 0, false}, // invalid minor defaults to 0
 		{"malformed output", 0, 0, true},     // not enough fields
 	}
 	for _, tt := range tests {
