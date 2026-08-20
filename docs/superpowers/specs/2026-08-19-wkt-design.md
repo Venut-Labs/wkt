@@ -78,7 +78,8 @@ State these in the README or users will assume them:
   see §5.1.)
 - **Not a remote-side boundary.** A task tree can push to the repository's real
   origin.
-- **No Windows in v0.** The blocker is symlinks-plus-perimeter, not packaging.
+- **No Windows in v0.** The blocker is symlinks (§5.3) plus deletion semantics
+  (H3), not packaging.
 - **Not a service multiplier.** One task owns the local stack at a time.
 
 ---
@@ -503,6 +504,24 @@ blast radius is a directory `wkt` owns.
 sit in a directory the agent can write; §5.6 denies them explicitly and step 5
 disarms hooks.
 
+**Two remotes, not one.** A de-borrowed store is a snapshot: it does **not** see
+commits the developer has made locally in the workspace and not pushed.
+Demonstrated — `git worktree add -b feat-c <path> <local-sha>` in a de-borrowed
+store fails with `fatal: invalid reference: <sha>`, while the same command in a
+`--shared` store succeeds. Since "branch this task from what I am working on
+right now" is a normal request, the store carries a second remote pointing at the
+workspace repository:
+
+```
+git -C <store> remote add workspace <workspace>/<repo>
+git -C <store> fetch workspace '+refs/heads/*:refs/remotes/ws/*'
+```
+
+`wkt new` fetches from `workspace` before resolving a base that is not already
+present. Verified: after that fetch the local-only commit is available in the
+store. `origin` remains the real remote and is the only thing `wkt push` ever
+writes to.
+
 **De-borrowing is the default, and it is nearly free.** `--shared` makes the
 store *borrow* objects through `objects/info/alternates`, so a borrowed store
 does not survive the workspace repository being deleted or re-cloned — only a
@@ -702,7 +721,8 @@ That asymmetry is the only reason a per-task deny is affordable at all.
   the narrower-`allow`-inside-broader-`deny` escape does not work (H16). A tree
   created *after* this
   one is uncovered until the perimeter is regenerated. `wkt status` reports the
-  drift; `wkt perimeter <task>` regenerates it.
+  drift; regenerating is the `WorktreeCreate` hook's job in v0 (the
+  `wkt perimeter` command is v0.1, §9).
 - The file lives at the tree root, but Claude Code reads settings from the
   session's cwd (H6a). A session started inside `<tree>/services/svc-a` does not
   see it. `wkt` therefore writes the perimeter at the tree root **and** into each
@@ -710,8 +730,8 @@ That asymmetry is the only reason a per-task deny is affordable at all.
 - Link slots point outside the tree. Writes *through* them are denied by the
   target rules, but the slot itself lives in writable space (H12).
 
-`wkt status` hash-checks every perimeter copy and refuses to report "isolated" on
-drift.
+`wkt status` hash-checks every perimeter copy and reports coverage and drift.
+It never reports "isolated" — v0 makes no isolation claim at all (§9).
 
 ### 5.7 Teardown
 
@@ -727,7 +747,7 @@ following exists, naming each:
   because of the refspec in §5.2), including the no-upstream and detached-HEAD
   cases;
 - in-progress rebase / merge / cherry-pick / revert / bisect;
-- a submodule with commits whose objects live under the doomed worktree;
+- **any submodule at all** — see below; this is a hard block, not a heuristic;
 - any `.git` found **without following symlinks** whose `--git-common-dir`
   resolves inside the task tree — refuse even with `--force`; its history exists
   nowhere else;
@@ -746,6 +766,22 @@ sequence and `wkt` says so rather than pretending atomicity.
 
 Removal is innermost-first, and every check for every repository completes before
 anything is removed.
+
+**Submodules need their own path, and the store does not save them.** Measured:
+`git worktree remove` on a worktree containing a submodule refuses
+unconditionally — `fatal: working trees containing submodules cannot be moved or
+removed` — so the safe path cannot remove such a tree *at all*, clean or not. And
+`--force` deletes the whole `<store>/<id>.git/worktrees/<name>/` directory, which
+is where the submodule's object store lives
+(`…/worktrees/<name>/modules/<path>`), so a commit made inside the submodule is
+destroyed: after a forced removal it was reachable neither from the store nor
+from the original submodule repository. Moving the gitdir into the store fixed
+H5; it does **not** fix this.
+
+Therefore: `wkt rm` blocks on any submodule and names it. The supported route is
+to push or salvage the submodule's commits first, `git submodule deinit` it, and
+then remove — and until that route is implemented and tested (v0.1), `wkt new`
+warns when a selected repository contains submodules.
 
 Salvage refs and quarantine are deferred to v0.2: a mechanism that restores
 perfectly is worthless while it fires on the wrong condition.
@@ -801,7 +837,7 @@ propagated.
 | `wkt new <task> [--repos …] [--all]` | Two-phase create (§5.5). `--repos` takes workspace-relative paths; a bare basename is accepted only when unique. With neither flag the default is `--all`. Exits 2 if the task exists. Leaves nothing behind on failure. |
 | `wkt add <task> <repo>` | Grafts at the task's recorded base epoch, not today's `origin/HEAD`. Refuses if the repository is already in the task, the task does not exist, the repository is not in the discovered set, or the base epoch SHA is no longer reachable. |
 | `wkt path <task>` | Prints the absolute tree path, one line; non-zero if the task does not exist. (Required by the acceptance battery.) |
-| `wkt status [<task>]` | Per repository: branch, base epoch and drift, dirty, ahead/behind, orphaned gitdir, link-slot integrity, perimeter hashes. Exit 0 consistent, 3 drift, 4 container missing. `--json`. |
+| `wkt status [<task>]` | Per repository: branch, base epoch and drift, dirty, ahead/behind, orphaned gitdir, link-slot integrity, perimeter coverage and hashes (no isolation verdict — §9). Exit 0 consistent, 3 drift, 4 container missing. `--json`. |
 | `wkt sync <task>` | Fetches in every store of the set, reports base drift for the whole set. Does not advance the base by itself. |
 | `wkt fetch <task>` | Brings task branches into the workspace repositories. Fast-forward only: refuses when the workspace ref exists and is not an ancestor, names both SHAs, offers `--as <name>`. Never a forcing refspec. |
 | `wkt rm <task> [--force]` | §5.7. |
@@ -877,6 +913,18 @@ refuses passes 12 and 13, and a tool whose `new` always fails passes 8, 9 and 10
     discovered correctly and not treated as a repository.
 19. Flat-workspace control — the whole suite against a flat layout, green from
     the first commit.
+20m. **Two tasks, one repository, one store.** Both worktrees are created; a
+    commit in task A is invisible in task B; the workspace stays on its own
+    branch and clean; removing A leaves B working and A's commit reachable in
+    the store. Verified by hand during design — this is the tool's core promise
+    and must not regress.
+21m. **A repository with a submodule** blocks `wkt rm` by name, and `wkt new`
+    warns at creation. Guards the measured fact that `worktree remove` refuses
+    unconditionally on such a tree while `--force` destroys the submodule's
+    objects.
+22m. **A task branched from an unpushed local commit** in the workspace
+    succeeds, proving the `workspace` remote is wired (§5.2). Without it the
+    de-borrowed store fails with `invalid reference`.
 
 ### 7.2 Perimeter battery — v0.1, not v0
 
@@ -894,8 +942,8 @@ re-run per release:
 21. Writing `../CLAUDE.md` does not reach the container, and a sibling task's
     session does not load it (H7).
 22. A sibling tree is neither readable nor writable — including a sibling created
-    after this tree, where `wkt status` must report drift and `wkt perimeter`
-    must close it (§5.6).
+    after this tree, where `wkt status` must report drift and regeneration (hook
+    in v0, `wkt perimeter` in v0.1) must close it (§5.6).
 23. The agent cannot rewrite or delete any perimeter copy (H13).
 24. H8 re-verification against the current release: what the vendor's own
     isolation covers, and what it leaves uncovered in a multi-repo workspace.
@@ -918,7 +966,7 @@ re-run per release:
 **Coverage map.** H1→1, H2→2/3, H3→4, H4→5, H5→6, H6a→20, H6b→20b, H7→21,
 H8→24, H9→(observation; the hook cannot block by contract), H10→8/9/10,
 H11→11, H12→12, H13→23, H14→(observation, pinned version range), H15→6/7,
-H16→25, H17→26/27.
+H16→25, H17→26/27. Core-promise and store-remote coverage: 20m, 21m, 22m.
 
 ---
 
@@ -984,9 +1032,10 @@ The hazard register is more credible saying "here is where isolation breaks and
 here is why we did not sell it" than shipping a perimeter command whose guarantee
 has a 20-task ceiling.
 
-Build order: `init` → store and base pins → `new` (two-phase) → `status` →
-`rm` (refuse-only) → `add` → `fetch` → `sync` → `repair` → `doctor` →
-perimeter generator → hook. Keep the flat-workspace control green from the
+Build order: `init` → store, two remotes and base pins → perimeter generator
+(`new` writes the file, so it cannot come later) → `new` (two-phase) →
+`status` → `rm` (refuse-only) → `add` → `fetch` → `sync` → `repair` →
+`doctor` → hook. Keep the flat-workspace control green from the
 first commit.
 
 **Kill criterion.** If installs and stars are negligible 30 days after launch,
@@ -1011,7 +1060,11 @@ register as a standalone artifact — that has value even if the tool does not.
 6. Which git config the store inherits from the workspace repository (`user.*`,
    `commit.gpgsign`, `gpg.*`, `core.sshCommand`, `url.*.insteadOf` — but
    explicitly not `core.hooksPath`).
-7. Licence and contribution policy before the first public commit.
+7. **git-LFS through a bare store.** LFS objects live in `.git/lfs`, which is
+   neither shared by alternates nor copied by `repack -a -d`. Could not be
+   tested — `git-lfs` is not installed on the machine used for §3. For a tool
+   aimed at multi-service workspaces this is a plausible day-one bug.
+8. Licence and contribution policy before the first public commit.
 
 ---
 
