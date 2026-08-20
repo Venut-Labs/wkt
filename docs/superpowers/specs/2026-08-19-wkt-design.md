@@ -422,8 +422,9 @@ deny list, which rules out enumerating sibling trees by name.
 **Headline:** one task, one branch, many repositories — a mirrored slice of your
 workspace with a coherent base.
 
-**Line two:** each task tree keeps agents inside it by default, so a run in one
-task does not land in another task's checkout.
+**Line two:** each task tree carries a generated settings file that keeps an
+agent inside it by default. §0 states what that is and is not; v0 makes no
+isolation claim beyond it (§9).
 
 Isolation is deliberately not the headline. We measured our own perimeter and it
 is defeated by a cwd change, by a path alias, by a shared parent directory and by
@@ -804,7 +805,7 @@ propagated.
 | `wkt sync <task>` | Fetches in every store of the set, reports base drift for the whole set. Does not advance the base by itself. |
 | `wkt fetch <task>` | Brings task branches into the workspace repositories. Fast-forward only: refuses when the workspace ref exists and is not an ancestor, names both SHAs, offers `--as <name>`. Never a forcing refspec. |
 | `wkt rm <task> [--force]` | §5.7. |
-| `wkt perimeter <task>` | Regenerates every perimeter copy; used by the session-start hook and after a sibling task appears. |
+| ~~`wkt perimeter <task>`~~ | **v0.1.** Regenerating perimeter copies is only worth a command once the perimeter is worth claiming; see §9. |
 | `wkt repair <task>` | Fixes gitdir back-pointers and link slots after a workspace move or a repository re-clone. Deterministic outcomes per case, specified in the battery. |
 | `wkt doctor` | Reconciles state against disk, store registrations and workspace pins; `--fix`. Also the uninstall path: reports every `refs/wkt/*` written into the user's repositories. |
 | `WorktreeCreate` hook | Idempotent, reattach-by-default, tolerant of payload shape (H14). Materialises the perimeter **before** returning, then emits the documented `hookSpecificOutput` JSON. No `WorktreeRemove` hook (H9). |
@@ -877,10 +878,12 @@ refuses passes 12 and 13, and a tool whose `new` always fails passes 8, 9 and 10
 19. Flat-workspace control — the whole suite against a flat layout, green from
     the first commit.
 
-### 7.2 Perimeter battery — requires a Claude Code session
+### 7.2 Perimeter battery — v0.1, not v0
 
-Gated, run manually or in a credentialed CI job, pinned to a Claude Code version
-range and re-run per release:
+Not part of v0 (§9). Retained here as the v0.1 plan and as the procedure for
+re-verifying the hazard register against a new Claude Code release. Requires a
+session, therefore credentials and a network; gated, pinned to a version range,
+re-run per release:
 
 20. A write into the workspace is refused from the tree root and from a
     materialised repository root; **and the same write from
@@ -952,36 +955,38 @@ self-filed and self-closed.
 
 ## 9. Plan
 
-Two coherent versions, and the difference is the perimeter.
+**v0 — 10–14 developer-weeks. The perimeter is out of v0. Decided.**
 
-**v0 with the perimeter — 18–26 developer-weeks.** H17 added work that is
-research rather than typing: measuring the profile budget, modelling coverage,
-and a fail-open behaviour no generated configuration can close. The mechanical
-battery alone is 3–4 weeks — 19 tests, each needing a multi-repo fixture, one of
-them being the whole suite again against a flat layout. `repair` and `doctor` are
-multi-week each. And §7.2 is not a one-off: it needs credentials and re-running
-per Claude Code release, and 2.1.220 → 2.1.236 shipped in under four weeks.
+In scope: store with de-borrowed mirrors and base pins, mirrored tree, two-phase
+create, refuse-only `rm`, `status`, `path`, `add`, `fetch`, `sync`, `repair`,
+`doctor`, the `WorktreeCreate` hook, and the mechanical battery (§7.1).
 
-**v0 without the perimeter — 10–14 developer-weeks.** Store, mirrored tree,
-two-phase create, refuse-only `rm`, `status`, `path`, `fetch`, `sync`, mechanical
-battery. The perimeter is still *generated* and its limits documented, but there
-is no `wkt perimeter` command and no gated battery.
+The perimeter file is still generated — it costs little and prevents real
+accidents — but there is **no `wkt perimeter` command, no session-gated battery
+(§7.2) and no isolation claim in the README beyond §0's honest statement.** §7.2
+is retained in this document as the v0.1 plan and as the re-verification
+procedure for the hazard register.
 
-**The scope tension, stated plainly.** §4 says isolation is deliberately not the
-headline and §0 says the perimeter only prevents accidents — yet §5.6, §7.2 and
-parts of §5.4 and §6 exist to serve it, and H17 shows it does not hold in the
-configuration that matters. Spending the largest engineering budget on the
-explicitly de-prioritised feature is incoherent. The same reasoning that killed
-`wkt run` in §6 — *the agent's recovery is to disable its own sandbox* — applies
-to the Bash half of §5.6.
+**Why.** §4 says isolation is deliberately not the headline and §0 says the
+perimeter only prevents accidents — yet §5.6, §7.2 and parts of §5.4 and §6
+existed to serve it, and H17 shows it does not hold in the configuration that
+matters. The same reasoning that killed `wkt run` in §6 — *the agent's recovery
+is to disable its own sandbox* — applies to the Bash half of §5.6, and the
+document did not notice for a full revision. Spending the largest engineering
+budget on the explicitly de-prioritised feature was incoherent.
 
-**Recommendation: ship the second version.** The hazard register is more
-credible saying "here is where isolation breaks and here is why we did not sell
-it" than shipping a perimeter command whose guarantee has a 20-task ceiling.
+For reference, the version that kept it was estimated at 18–26 weeks, and §7.2
+carries an ongoing per-release verification tax: Claude Code shipped 2.1.220 →
+2.1.236 in under four weeks, and the hooks and sandbox surfaces are exactly what
+changed.
 
-Build order: `init` → store and base pins → perimeter generator → `new`
-(two-phase) → `status` → `rm` (refuse-only) → `add` → `fetch` → `sync` →
-`repair` → `doctor` → hooks. Keep the flat-workspace control green from the
+The hazard register is more credible saying "here is where isolation breaks and
+here is why we did not sell it" than shipping a perimeter command whose guarantee
+has a 20-task ceiling.
+
+Build order: `init` → store and base pins → `new` (two-phase) → `status` →
+`rm` (refuse-only) → `add` → `fetch` → `sync` → `repair` → `doctor` →
+perimeter generator → hook. Keep the flat-workspace control green from the
 first commit.
 
 **Kill criterion.** If installs and stars are negligible 30 days after launch,
@@ -1018,7 +1023,7 @@ register as a standalone artifact — that has value even if the tool does not.
 | D2 | Mirror the workspace shape, never flatten | **Survives**; strengthened by back-filling un-materialised repos |
 | D3 | Non-git content symlinked | Changed: ancestors materialised, loose files copied and hash-reconciled, scans split by purpose |
 | D4 | Atomic teardown, `--force` salvages | Changed: v0 refuse-only, staging fence with locks, salvage deferred |
-| D5a | Perimeter via generated settings | Changed: canonicalised, self-protecting, written per repository, store explicitly writable, limits stated |
+| D5a | Perimeter via generated settings | **Descoped from v0** after H17 — the file is still generated, but no command, no gated battery and no isolation claim; §5.6's limits are documented instead |
 | D5b | `wkt run` OS sandbox | **Killed** — not buildable as specified |
 | D6 | Whole workspace readable | Changed: sibling trees and credential paths deny-read |
 | D7 | Mutable repo set | Changed: base epoch defined as a recorded instant; size-defaults and presets cut |
