@@ -121,7 +121,11 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		// A bulk-ignored directory collapses to one "!! dir/" line — its
 		// contents are never listed individually — so an allowlisted
 		// directory is trusted whole, and an unrecognised one blocks whole:
-		// unknown means precious, not just unknown-named files.
+		// unknown means precious, not just unknown-named files. A failed
+		// check is not "no ignored content" (spec §5.7: "a failed check of
+		// any kind ... is treated as 'would lose work'") — the first check
+		// above already got this right; this one and the three below it
+		// used to fail open, each on its own "err == nil" with no else.
 		if s, err := gitx.Run(wt, "status", "--porcelain", "--ignored=matching"); err == nil {
 			for _, line := range strings.Split(s, "\n") {
 				if !strings.HasPrefix(line, "!! ") {
@@ -134,6 +138,8 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 				}
 				out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: rel})
 			}
+		} else {
+			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "ignored-content check"})
 		}
 		// 4: in-progress operations — invisible to status --porcelain (H2):
 		// empty during an interactive rebase pause, a bisect, or a detached
@@ -141,6 +147,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		for _, marker := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"} {
 			p, err := gitx.Run(wt, "rev-parse", "--git-path", marker)
 			if err != nil {
+				out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "in-progress check (" + marker + ")"})
 				continue
 			}
 			// --git-path may answer relatively or absolutely; --path-format needs
@@ -160,15 +167,23 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		if r.BaseSHA != "" {
 			args = append(args, r.BaseSHA)
 		}
-		if n, err := gitx.Run(wt, args...); err == nil && n != "" && n != "0" {
-			out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: n + " commit(s)"})
+		if n, err := gitx.Run(wt, args...); err == nil {
+			if n != "" && n != "0" {
+				out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: n + " commit(s)"})
+			}
+		} else {
+			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "unpushed-commit check"})
 		}
 		// 6: submodules — worktree remove refuses unconditionally, and --force
 		// destroys their object store (spec §5.7). Run from the worktree, not the
 		// store, since submodule state is per-worktree (index-based) and this
 		// fires even when the addition is fully committed and status is clean.
-		if sm, err := gitx.Run(wt, "submodule", "status", "--recursive"); err == nil && strings.TrimSpace(sm) != "" {
-			out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: firstLine(sm)})
+		if sm, err := gitx.Run(wt, "submodule", "status", "--recursive"); err == nil {
+			if strings.TrimSpace(sm) != "" {
+				out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: firstLine(sm)})
+			}
+		} else {
+			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "submodule check"})
 		}
 	}
 

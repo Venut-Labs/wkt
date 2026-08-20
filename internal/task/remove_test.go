@@ -818,3 +818,157 @@ func TestRemoveResumesFromStagingWhenTheTreeWasAlreadyMovedButNotFullyDeleted(t 
 		t.Fatal("the task's state file must be gone")
 	}
 }
+
+// --- Review finding Important 3: four Preflight checks failed open. Each
+// was guarded by "err == nil" with no else, so a git failure silently
+// produced zero blockers from that check instead of one — unlike the very
+// first check (plain "status --porcelain"), which already correctly
+// emitted WKT_CHECK_FAILED in its own else branch. Spec §5.7 is explicit:
+// "a failed check of any kind ... is treated as 'would lose work'."
+
+// withFailingGit installs a "git" shim ahead of PATH for the rest of the
+// test that fails any invocation whose argument list starts with prefix
+// and delegates everything else, byte for byte, to the real git — used to
+// make exactly one of Preflight's git calls fail while the others (in
+// particular the first, already-correct "status --porcelain" check) keep
+// succeeding, so each else branch can be proven in isolation.
+func withFailingGit(t *testing.T, prefix string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  \"" + prefix + "\"*)\n" +
+		"    echo 'injected failure for testing' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exec \"" + real + "\" \"$@\"\n"
+	shim := filepath.Join(dir, "git")
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestPreflightFailsClosedWhenTheBaseSHACannotBeResolved is the review
+// finding's own reproduction: a base_sha the store can no longer resolve
+// makes "git rev-list ... <bad-sha>" error, and the old code silently
+// dropped the unpushed-commit blocker instead of reporting that the check
+// itself failed.
+func TestPreflightFailsClosedWhenTheBaseSHACannotBeResolved(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-badbase", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Repos[0].BaseSHA = strings.Repeat("f", 40)
+	if err := state.Save(c.StateDir(), task); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_CHECK_FAILED" && strings.Contains(b.Detail, "unpushed") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("an unresolvable base SHA must fail the unpushed-commit check closed, got %+v", blockers)
+	}
+
+	if err := Remove(c, task.Name, false); err == nil {
+		t.Fatal("a failed unpushed-commit check must block removal: 'cannot tell' is 'would lose work'")
+	}
+	if _, statErr := os.Stat(task.Repos[0].WorktreePath); statErr != nil {
+		t.Fatal("the refused removal must not have deleted anything")
+	}
+}
+
+func TestPreflightFailsClosedWhenTheIgnoredContentCheckFails(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-ignoredfail", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFailingGit(t, "status --porcelain --ignored=matching")
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_CHECK_FAILED" && strings.Contains(b.Detail, "ignored-content") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a failed ignored-content check must fail closed, got %+v", blockers)
+	}
+
+	if err := Remove(c, task.Name, false); err == nil {
+		t.Fatal("a failed ignored-content check must block removal")
+	}
+}
+
+func TestPreflightFailsClosedWhenTheInProgressCheckFails(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-inprogressfail", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFailingGit(t, "rev-parse --git-path")
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_CHECK_FAILED" && strings.Contains(b.Detail, "in-progress check") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a failed in-progress check must fail closed, got %+v", blockers)
+	}
+
+	if err := Remove(c, task.Name, false); err == nil {
+		t.Fatal("a failed in-progress check must block removal")
+	}
+}
+
+func TestPreflightFailsClosedWhenTheSubmoduleCheckFails(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-submodulefail", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFailingGit(t, "submodule status --recursive")
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_CHECK_FAILED" && strings.Contains(b.Detail, "submodule check") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a failed submodule check must fail closed, got %+v", blockers)
+	}
+
+	if err := Remove(c, task.Name, false); err == nil {
+		t.Fatal("a failed submodule check must block removal")
+	}
+}
