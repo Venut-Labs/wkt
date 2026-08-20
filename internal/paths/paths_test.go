@@ -63,3 +63,20 @@ func TestIsUnderMultiLevelNonexistent(t *testing.T) {
 		t.Fatal("b/x/y must be under b even though x and y don't exist")
 	}
 }
+
+func TestIsUnderMultiLevelNonexistentThroughSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(link, "x", "y")
+	// Neither x nor y exist; resolution must recursively walk up through the symlink
+	if !IsUnder(target, real) {
+		t.Fatal("link/x/y must be under real when link -> real, even though x and y don't exist")
+	}
+}
