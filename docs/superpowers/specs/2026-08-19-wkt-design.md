@@ -1,7 +1,8 @@
 # wkt — design
 
-**Status:** design, not implemented. Written 2026-08-19, revised the same day
-after two adversarial review passes.
+**Status:** design, not implemented. Written 2026-08-19, revised through three
+adversarial review passes (decisions, document, and a final judge pass that ran
+its own fixtures).
 **Working name:** `wkt`. Public name TBD (`wt` is taken by worktrunk).
 **Environment under test:** macOS Darwin 25.6.0 / APFS, git 2.50.1,
 Claude Code 2.1.220 (current release at the time of writing: 2.1.235).
@@ -25,6 +26,9 @@ is. There isn't one. The perimeter exists to prevent **accidents**:
 **Out of scope (we do not defend against):**
 - a prompt-injected or hostile agent deliberately escaping. Every mechanism we
   use is defeatable — §5.6 lists how;
+- **an agent that disables its own sandbox after a refusal.** Observed behaviour
+  on 2.1.220, not a hypothetical (H17): the refused command is re-run with
+  `dangerouslyDisableSandbox: true` and succeeds;
 - exfiltration. The tree can read the workspace and reach the network;
 - anything remote-side. A task can push to the real origin; branch protection on
   the forge is the only control there;
@@ -143,8 +147,13 @@ close to a specification of this tool.
   `#33813` *"Codex sandbox mounts empty .git at non-repo workspace root, breaking
   Git discovery in multi-repo workspaces"*, `#10817` *"Codex App Diff View fails
   to work with multi-repo directory"*.
-- `anthropics/claude-code#80442` (open, 2026-07-23) is the sharpest single piece
-  of evidence, and it is exactly our scenario: *"The session ran in a
+- `anthropics/claude-code#23627` *"[FEATURE] Multi-repository support for
+  remote/web sessions"* — **open, 92 reactions**, 2026-02-06. This is the
+  highest-signal multi-repo demand artefact found anywhere, and it is the only
+  citation here with real traffic behind it.
+- `anthropics/claude-code#80442` (open, 2026-07-23) is the sharpest *description
+  of the failure mode* — not evidence of demand, it carries 0 reactions and 1
+  comment — and it is exactly our scenario: *"The session ran in a
   `.claude/worktrees/` worktree for repo A (correctly). The task then required
   Terraform changes in a second repo configured as an additional working
   directory. The agent edited files and attempted to create a branch and commit
@@ -274,19 +283,22 @@ before publishing, and record the version.
 ### H9 — `WorktreeRemove` did not fire in the non-git workspace path
 
 On 2.1.220, in a non-git workspace driven by a `WorktreeCreate` hook,
-`ExitWorktree(remove)` refused permanently and `WorktreeRemove` consequently
-never fired, so a plugin-driven task leaks its tree, branches and registrations.
-Scope this claim to what was observed rather than asserting the hook never fires
-anywhere. **Either way, a removal guarantee cannot live in a hook: the documented
+`ExitWorktree(remove)` refuses on the first call and names `discard_changes:
+true` as the retry; the retry succeeds and **does** fire `WorktreeRemove` with a
+well-formed `worktree_path` payload. It does not fire on git's built-in removal
+path, at `-p` session exit, or when a subagent's worktree is swept — so a
+plugin-driven task can still leak its tree, branches and registrations. **Either way, a removal guarantee cannot live in a hook: the documented
 contract says `WorktreeRemove` cannot block, and its failures are logged in debug
 mode only.**
 
 ### H10 — one branch name breaks five ways
 
-Existing divergent branch, silently reused → repositories on different bases;
-default branch not `main` → aborts mid-set with no rollback and a partial tree;
-branch already checked out elsewhere; D/F ref conflict (`feat/42` permanently
-blocks `feat`); case-fold collapse on APFS, so macOS and Linux disagree.
+Existing divergent branch — silently reused by `git worktree add <path> <branch>`
+(the `-b` form used in §5.2 and H15 hard-errors instead) → repositories on
+different bases; default branch not `main` → aborts mid-set with no rollback and
+a partial tree; branch already checked out elsewhere; D/F ref conflict (`feat/42`
+blocks `feat` for as long as the ref exists, and symmetrically; `pack-refs` does
+not lift it); case-fold collapse on APFS, so macOS and Linux disagree.
 
 ### H11 — `--shared` alternates die to a workspace `gc`
 
@@ -316,10 +328,14 @@ the tree still worked.
 
 ### H14 — the `WorktreeCreate` payload differs from the public docs
 
-Observed on 2.1.220: `{session_id, transcript_path, cwd, hook_event_name, name}`,
-with `CLAUDE_PROJECT_DIR` in the environment. `transcript_path` names a file that
-is never created. `--resume --worktree` re-fires the event. Treat the payload
-shape as unstable, tolerate unknown fields, and pin a tested version range.
+Observed on 2.1.220, and the shape differs by entry path: five keys
+(`session_id, transcript_path, cwd, hook_event_name, name`) on the `--worktree`
+startup path, six on the `EnterWorktree` path (plus `prompt_id`), with
+`CLAUDE_PROJECT_DIR` in the environment. `transcript_path` names a file that does
+not yet exist at hook time on the startup path, but does exist with content on
+the `EnterWorktree` path — so it must not be used as a readable path.
+`--resume --worktree` re-fires the event. Treat the payload as unstable, tolerate
+unknown fields, and pin a tested version range.
 
 ### H15 — the store design works (verified end to end)
 
@@ -367,6 +383,37 @@ whose perimeter carried `allowWrite: [<container>/store]` together with narrower
 
 So a narrower `denyWrite` does win over a broader `allowWrite`, which is what
 makes the store writable for commits while its hook directory stays closed.
+
+**The converse does not hold**, and it matters for §5.6's size budget: a narrower
+`allowWrite` inside a broader `denyWrite` does **not** re-open the region.
+Verified — with `denyWrite: [<container>/trees]` and
+`allowWrite: [<container>/trees/feat-42]`, a write into the task's **own** tree
+was refused (`operation not permitted`). Deny wins in both directions, so
+"one glob for all siblings plus an allow for mine" is not available.
+
+### H17 — the Bash perimeter fails open, and it has a hard size ceiling
+
+Two measured properties of Claude Code 2.1.220, either of which alone downgrades
+the perimeter from "defeatable by a determined agent" to "routinely defeated by
+an undetermined one".
+
+**Fail-open.** After the sandbox refuses a write with `operation not permitted`,
+Claude Code re-runs the same command with `dangerouslyDisableSandbox: true` on
+its own initiative, and the write lands. Observed in 4 of 6 runs; in 2 the model
+declined. This is the agent's normal recovery path, not an exploit.
+
+**E2BIG.** The sandbox profile is passed to every command through `exec`. On
+macOS `kern.argmax` is 1 MiB. A clean session already carries ~158 deny paths;
+above roughly 234 total the profile exceeds the limit and **no Bash command runs
+at all** — `Could not start /bin/zsh: the command line plus environment exceed
+the OS exec argument limit (E2BIG)`. Measured growth: 150 added paths → 1.6 MB;
+600 → 4.3 MB; 1500 → 9.8 MB. The observed recovery is, again, to retry with the
+sandbox off.
+
+**Consequence for the design.** Any perimeter whose entry count grows with the
+number of tasks hits the ceiling at roughly 20–25 concurrent tasks — in a tool
+whose premise is concurrency. §5.6 is therefore constrained to a **constant-size**
+deny list, which rules out enumerating sibling trees by name.
 
 ---
 
@@ -453,11 +500,20 @@ blast radius is a directory `wkt` owns.
 
 **What this does not buy.** The store has its own `hooks/` and `config`, and they
 sit in a directory the agent can write; §5.6 denies them explicitly and step 5
-disarms hooks. And `--shared` means the store *borrows* objects: it does **not**
-survive the workspace repository being deleted or re-cloned, only a workspace
-`gc` (with the pin). If durability against deletion is wanted later, the store
-must be de-borrowed with `git repack -a -d` after creation, at the cost of a full
-object copy — an explicit, opt-in trade, not the default.
+disarms hooks.
+
+**De-borrowing is the default, and it is nearly free.** `--shared` makes the
+store *borrow* objects through `objects/info/alternates`, so a borrowed store
+does not survive the workspace repository being deleted or re-cloned — only a
+workspace `gc`, and only with the pin. Measured on a 60-commit fixture: borrowed
+store 88K, de-borrowed store 128K, `git repack -a -d` took 0.06s, and after
+deleting the source repository the de-borrowed store still logged normally while
+the borrowed one failed with `unable to normalize alternate object path`. The
+cost scales with repository size rather than staying at 40K, so `wkt init`
+reports the projected store size and a threshold makes borrowing the fallback for
+very large repositories — but the default is the durable one, because the failure
+mode of the cheap option is silent, unrecoverable, and lands on a user who
+deleted a directory they were entitled to think was theirs.
 
 **Sync.** With step 4 in place, `git -C <store> fetch origin` populates
 `refs/remotes/origin/*`, which makes both `wkt sync` and the unpushed-commit
@@ -529,8 +585,11 @@ suffix — `repair` cannot work without it), and the `refs/wkt/base` pin written
 
 Per task: schema version, the base epoch (an RFC3339 instant recorded at create —
 the wall-clock moment the whole set was resolved), link slots with type and
-absolute target, copied loose files with content hashes, perimeter file hash,
-container and workspace canonical paths with every known spelling.
+absolute target, copied loose files with content hashes, **perimeter coverage —
+the list of directories a perimeter copy exists in, not merely its hash** (H6a
+makes coverage the question a user will actually ask), the emitted sandbox deny
+path count against the configured cap (H17), container and workspace canonical
+paths with every known spelling.
 
 "Hint only, never authoritative" was the original position and it was wrong:
 every unrecoverable failure found in review was unrecoverable because nothing
@@ -581,7 +640,7 @@ generator emits an explicit deny list, regenerated on every session start.
       "Edit(//<workspace>/**)",
       "Edit(//<container>/state/**)",
       "Edit(//<container>/staging/**)",
-      "Edit(//<container>/trees/<each-other-task>/**)",
+      "Edit(//<container>/trees/<each-other-task>/**)",   /* permissions only — see below */
       "Edit(//<container>/store/*.git/hooks/**)",
       "Edit(//<container>/store/*.git/config)",
       "Edit(//<tree>/.claude/**)",
@@ -595,8 +654,7 @@ generator emits an explicit deny list, regenerated on every session start.
       "denyWrite":  ["<workspace>", "<container>/state", "<container>/staging",
                      "<container>/store/*.git/hooks", "<container>/store/*.git/config",
                      "<tree>/.claude", "<tree>/.wkt"],
-      "denyRead":   ["<container>/trees/<each-other-task>", "~/.ssh", "~/.aws",
-                     "~/.config/gh", "~/.claude"]
+      "denyRead":   ["~/.ssh", "~/.aws", "~/.config/gh", "~/.claude"]
     },
     "credentials": { "envVars": [ /* deny the obvious token variables */ ] }
   }
@@ -613,10 +671,35 @@ Every path appears in **all known spellings** — as typed, `realpath`, and the
 macOS `/private` form. Deny globs are lexical: an alias such as
 `~/work -> /Volumes/Data/work` defeats a single spelling entirely.
 
+**The two lists have different cost models, and this is load-bearing (H17).**
+The `sandbox.filesystem` paths are compiled into a profile passed to *every*
+Bash command through `exec`, so their count is bounded by `kern.argmax`; that
+list must stay **constant-size** — seven paths in three spellings, never growing
+with the number of tasks. Sibling trees are therefore absent from it, and they do
+not need to be: sandboxed Bash writes are already confined to the working
+directory by default, so a sibling tree is closed without being named.
+
+The `permissions.deny` entries are evaluated inside Claude Code and are not
+passed through `exec`, so enumerating sibling trees there is safe at any count.
+That asymmetry is the only reason a per-task deny is affordable at all.
+
 **Stated limitations**, all of which belong in the README:
 
-- Sibling trees are enumerated by name, not by a glob, because any glob wide
-  enough to catch them catches the task's own tree. A tree created *after* this
+- **The Bash half is advisory (H17).** After a refusal, Claude Code was observed
+  re-running the command with `dangerouslyDisableSandbox: true` on its own
+  initiative, and the write landed — 4 runs in 6. Nothing `wkt` generates
+  prevents this.
+- **A perimeter file covers only the directory it sits in (H6a).** `wkt` writes a
+  copy at the tree root and at each materialised repository root; a session
+  started deeper — `<tree>/services/svc-a/src` — has **no perimeter at all**.
+  Verified: the same workspace write is refused from the repository root and
+  succeeds one directory below it. Materialising a copy into every directory is
+  unbounded and litters the user's repositories, so v0 documents the limit and
+  `wkt status` reports which directories are covered.
+- Sibling trees are enumerated by name in `permissions.deny`, not by a glob,
+  because any glob wide enough to catch them catches the task's own tree — and
+  the narrower-`allow`-inside-broader-`deny` escape does not work (H16). A tree
+  created *after* this
   one is uncovered until the perimeter is regenerated. `wkt status` reports the
   drift; `wkt perimeter <task>` regenerates it.
 - The file lives at the tree root, but Claude Code reads settings from the
@@ -743,7 +826,10 @@ Two batteries, because they need different things.
 
 ### 7.1 Mechanical battery — no credentials, no network, CI on macOS and Linux
 
-Pointed at any implementation via `WT_CMD`, in the style of the starter pack.
+Pointed at any implementation via `WT_CMD`, in the style of the starter pack. The
+pack drives `create`, `cleanup` and `path`; `wkt` ships `create` and `cleanup` as
+documented aliases for `new` and `rm`, and `WT_TASK_DIR_TEMPLATE` goes unused
+because `wkt path` is authoritative.
 Note that the starter pack's `is_worktree_of` helper — which asserts that the
 tree's `--git-common-dir` equals the *workspace repository's* — is invalidated by
 the store design and must be replaced with: the tree's `--git-common-dir`
@@ -752,8 +838,9 @@ Likewise its "reachable from the original repository" assertion becomes
 "reachable from the store, and from the workspace repository after `wkt fetch`".
 The battery also requires `wkt path`.
 
-Every refusal test has a paired positive phase — otherwise a tool whose `rm`
-always refuses passes, and a tool whose `new` always fails passes too.
+Tests 1–3 have a paired positive phase, and tests 8–10, 12, 13 and 15 **must
+grow one before the battery is trusted** — as written, a tool whose `rm` always
+refuses passes 12 and 13, and a tool whose `new` always fails passes 8, 9 and 10.
 
 1. Ignored `.env` survives a plain `rm` (H1); then, once cleaned, `rm` succeeds
    and leaves no registration in the store.
@@ -795,8 +882,12 @@ always refuses passes, and a tool whose `new` always fails passes too.
 Gated, run manually or in a credentialed CI job, pinned to a Claude Code version
 range and re-run per release:
 
-20. A write into the workspace is refused from the tree root **and** from inside
-    a materialised repository (H6a).
+20. A write into the workspace is refused from the tree root and from a
+    materialised repository root; **and the same write from
+    `<tree>/<repo>/<subdir>` is recorded as uncovered** — a known-limitation
+    test, not a pass/fail isolation test (H6a).
+20b. A session whose cwd is a back-filled link slot (`<tree>/shared`) loads the
+    task's instructions, not the workspace's (H6b).
 21. Writing `../CLAUDE.md` does not reach the container, and a sibling task's
     session does not load it (H7).
 22. A sibling tree is neither readable nor writable — including a sibling created
@@ -805,10 +896,26 @@ range and re-run per release:
 23. The agent cannot rewrite or delete any perimeter copy (H13).
 24. H8 re-verification against the current release: what the vendor's own
     isolation covers, and what it leaves uncovered in a multi-repo workspace.
+25. **The H16 composition test.** From a session at the tree root under the
+    generated perimeter: `git add && git commit` in a materialised repository
+    **succeeds**; a write to `<store>/<id>.git/hooks/<file>` is refused; a write
+    elsewhere in `<container>/store` succeeds. This is the reason `allowWrite` on
+    the store is safe. (Probe with a benign filename — a file literally named
+    `post-commit` is refused by the model before it reaches the sandbox, which
+    will confuse whoever re-runs this.)
+26. **Fail-open budget (H17).** Assert on filesystem state after N repetitions of
+    a denied write, with a stated flake budget — not on a single session's
+    refusal, because the agent's sandbox-disabling retry makes refusals
+    non-deterministic.
+27. **Perimeter size cap (H17).** With M sibling tasks present, the emitted
+    sandbox deny path count stays under the cap and Bash still runs; past the cap
+    `wkt status` refuses to report "isolated" rather than emitting a profile that
+    bricks Bash with `E2BIG`.
 
-**Coverage map.** H1→1, H2→2/3, H3→4, H4→5, H5→6, H6→20, H7→21, H8→24, H9→
-(observation, no test — the hook cannot block by contract), H10→8/9/10, H11→11,
-H12→12, H13→23, H14→(observation, pinned version range), H15→6/7, H16→6/7 plus perimeter test 20.
+**Coverage map.** H1→1, H2→2/3, H3→4, H4→5, H5→6, H6a→20, H6b→20b, H7→21,
+H8→24, H9→(observation; the hook cannot block by contract), H10→8/9/10,
+H11→11, H12→12, H13→23, H14→(observation, pinned version range), H15→6/7,
+H16→25, H17→26/27.
 
 ---
 
@@ -822,8 +929,8 @@ Go over Rust: single static binary, trivial cross-compilation, low contribution
 barrier, and `os.RemoveAll` immunity to H3. The workload is filesystem walking,
 shelling to git and JSON.
 
-**Minimum git:** 2.30 (`worktree repair`); tested on 2.50.1. `wkt doctor`
-refuses on anything below the floor.
+**Minimum git:** 2.29 (`worktree repair` landed in 2.29.0); tested on 2.50.1.
+`wkt doctor` refuses on anything below the floor.
 
 Plugin packaging and the `/wkt` skill are v0.1. Note that the Claude Code plugin
 marketplaces already carry worktree plugins — including worktrunk's own — so the
@@ -834,25 +941,43 @@ notability gate is met — 30 forks / 30 watchers / 75 stars for a third-party
 submission, 90 / 90 / 225 for a self-submission, and the repository must be at
 least 30 days old.
 
-Launch: post into live threads where the need is documented —
-`openai/codex#11956`, `anthropics/claude-code#80442` and its neighbours,
-`microsoft/vscode#318526`. Not `worktrunk#3501`: it is closed, self-filed and
-self-closed, and reaches nobody.
+Launch: post where traffic actually exists — `openai/codex#11956` (open, 75
+reactions) and `anthropics/claude-code#23627` (open, 92 reactions). The other
+issues cited in §2.4 (`#80442`, `#73824`, `#78505`, `#85448`,
+`microsoft/vscode#318526`) carry 0–4 reactions each; they are evidence of the
+failure mode, not distribution channels. Not `worktrunk#3501` either: closed,
+self-filed and self-closed.
 
 ---
 
 ## 9. Plan
 
-**v0 — 12–16 developer-weeks.** The earlier 6–8 estimate did not survive §5:
-two-phase create with rollback, canonicalisation across spellings, the classified
-scan, authoritative state with a reconciler, `repair`, the staging fence, the
-concurrency section and two batteries are each multi-day items, and the
-mechanical battery alone is roughly two weeks.
+Two coherent versions, and the difference is the perimeter.
 
-If 6–8 weeks is the constraint, the honest cut is: no `repair`, no `doctor`, no
-state reconciler, refuse-only `rm` without the submodule and precious-file
-classifiers, bounded discovery only, and no perimeter battery. Say which was
-chosen.
+**v0 with the perimeter — 18–26 developer-weeks.** H17 added work that is
+research rather than typing: measuring the profile budget, modelling coverage,
+and a fail-open behaviour no generated configuration can close. The mechanical
+battery alone is 3–4 weeks — 19 tests, each needing a multi-repo fixture, one of
+them being the whole suite again against a flat layout. `repair` and `doctor` are
+multi-week each. And §7.2 is not a one-off: it needs credentials and re-running
+per Claude Code release, and 2.1.220 → 2.1.236 shipped in under four weeks.
+
+**v0 without the perimeter — 10–14 developer-weeks.** Store, mirrored tree,
+two-phase create, refuse-only `rm`, `status`, `path`, `fetch`, `sync`, mechanical
+battery. The perimeter is still *generated* and its limits documented, but there
+is no `wkt perimeter` command and no gated battery.
+
+**The scope tension, stated plainly.** §4 says isolation is deliberately not the
+headline and §0 says the perimeter only prevents accidents — yet §5.6, §7.2 and
+parts of §5.4 and §6 exist to serve it, and H17 shows it does not hold in the
+configuration that matters. Spending the largest engineering budget on the
+explicitly de-prioritised feature is incoherent. The same reasoning that killed
+`wkt run` in §6 — *the agent's recovery is to disable its own sandbox* — applies
+to the Bash half of §5.6.
+
+**Recommendation: ship the second version.** The hazard register is more
+credible saying "here is where isolation breaks and here is why we did not sell
+it" than shipping a perimeter command whose guarantee has a 20-task ceiling.
 
 Build order: `init` → store and base pins → perimeter generator → `new`
 (two-phase) → `status` → `rm` (refuse-only) → `add` → `fetch` → `sync` →
@@ -904,4 +1029,5 @@ register as a standalone artifact — that has value even if the tool does not.
 | D12 | `status` + `push` + PR | Changed: `status`/`sync`/`fetch` in v0; `push`/PR deferred |
 | D13 | Isolation as the headline | **Inverted**: multi-repo shape leads |
 | D14 | Bare mirrors in the store | Added — without it `commit` and the perimeter are mutually exclusive |
+| D16 | Perimeter constant-size, coverage recorded | Added after H17 — sandbox deny paths are `exec`-bound and fail open past a ceiling |
 | D15 | State authoritative, not a hint | **Reversed** from the first draft — every unrecoverable failure in review was unrecoverable because nothing authoritative was recorded |
