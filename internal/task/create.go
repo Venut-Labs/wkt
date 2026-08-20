@@ -177,18 +177,29 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 			return state.Task{}, wkterr.New("WKT_TREE_BUILD", "cannot create an ancestor directory").
 				WithPath(r.WorktreePath)
 		}
+		storePath, wtPath := sp, r.WorktreePath
+		// "worktree add -b" creates the branch before it checks anything
+		// out, and can still fail on the checkout itself (a non-empty
+		// destination, an unwritable one, content in the base commit the
+		// filesystem refuses) — so the branch-delete undo must be
+		// registered before the call, exactly like the pin undo above, or
+		// a failed worktree add leaks a branch and the task name becomes
+		// permanently unusable (WKT_BRANCH_EXISTS on every later attempt).
+		undos = append(undos, func() { _, _ = gitx.Run(storePath, "branch", "-D", name) })
 		if _, err := gitx.Run(sp, "worktree", "add", "-q", "-b", name, r.WorktreePath, r.BaseSHA); err != nil {
 			rollback()
 			return state.Task{}, wkterr.New("WKT_WORKTREE_ADD", "cannot create the worktree").
 				WithRepo(r.RelPath).WithPath(r.WorktreePath)
 		}
-		storePath, wtPath := sp, r.WorktreePath
 		undos = append(undos, func() {
 			// Force twice: a single --force removes a dirty worktree but still
 			// refuses one that is locked, and by the time rollback runs, the
-			// worktree lock below has usually already been taken.
+			// worktree lock below has usually already been taken. Registered
+			// after the branch-delete undo above, so rollback (LIFO) removes
+			// the worktree registration before it tries to delete the branch
+			// it was checked out on — git refuses to delete a branch that is
+			// still checked out anywhere.
 			_, _ = gitx.Run(storePath, "worktree", "remove", "--force", "--force", wtPath)
-			_, _ = gitx.Run(storePath, "branch", "-D", name)
 		})
 		if _, err := gitx.Run(sp, "worktree", "lock", "--reason", "held by wkt task "+name, r.WorktreePath); err != nil {
 			rollback()

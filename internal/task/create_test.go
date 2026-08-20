@@ -166,3 +166,69 @@ func TestCreateRemovesBasePinWhenStoreEnsureFailsAfterWritingIt(t *testing.T) {
 		t.Fatalf("rollback must remove the base pin even when store.Ensure fails after writing it, found %q", out)
 	}
 }
+
+// TestCreateRollsBackBranchWhenWorktreeAddFails reproduces review finding
+// Important 4: "worktree add -b" creates the branch as a side effect before
+// it checks anything out, and can still fail on the checkout itself. The
+// undo that deletes that branch used to be registered only after "worktree
+// add" returned successfully, so a checkout failure left the branch behind
+// forever and the task name permanently unusable (WKT_BRANCH_EXISTS on
+// every later Create attempt).
+//
+// The failure is fabricated via plumbing rather than a pre-existing,
+// non-empty destination directory: review finding Important 5 (fixed
+// separately, in the same pass) makes Create refuse up front whenever
+// trees/<name> already exists, which would trip before ever reaching
+// "worktree add" if the destination were pre-populated. Instead, the base
+// commit's own tree is given an entry literally named ".git" — git refuses
+// to check that out ("invalid path '.git'") — built with hash-object /
+// mktree / commit-tree so no working tree, anywhere, ever holds it; the
+// local filesystem's own refusal to create a directory named ".git" is
+// never in the path. Confirmed empirically against real git before writing
+// this test: the branch is created and "worktree add" still exits non-zero.
+func TestCreateRollsBackBranchWhenWorktreeAddFails(t *testing.T) {
+	c, _ := fixture(t)
+	repo := filepath.Join(c.Workspace, "docs")
+
+	hashObj := exec.Command("git", "hash-object", "-w", "--stdin")
+	hashObj.Dir = repo
+	hashObj.Stdin = strings.NewReader("malicious\n")
+	blobOut, err := hashObj.Output()
+	if err != nil {
+		t.Fatalf("git hash-object: %v", err)
+	}
+	blob := strings.TrimSpace(string(blobOut))
+
+	mktree := exec.Command("git", "mktree")
+	mktree.Dir = repo
+	mktree.Stdin = strings.NewReader("100644 blob " + blob + "\t.git\n")
+	treeOut, err := mktree.Output()
+	if err != nil {
+		t.Fatalf("git mktree: %v", err)
+	}
+	tree := strings.TrimSpace(string(treeOut))
+
+	commit := strings.TrimSpace(g(t, repo, "commit-tree", tree, "-m", "evil tree with a .git entry"))
+	g(t, repo, "update-ref", "refs/heads/main", commit)
+
+	entries2, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(c, entries2, "feat-leak", []string{"docs"}); err == nil {
+		t.Fatal("create must fail when the base commit cannot be checked out")
+	}
+
+	docsStore := filepath.Join(c.StoreDir(), store.ID("docs", repo)+".git")
+	if out := g(t, docsStore, "branch", "--list", "feat-leak"); len(out) != 0 {
+		t.Fatalf("a failed worktree add must not leak the branch git created before the checkout failed, found %q", out)
+	}
+
+	entries3, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(c, entries3, "feat-leak", []string{"services/svc-a"}); err != nil {
+		t.Fatalf("a name freed by a failed create's rollback must be reusable, got: %v", err)
+	}
+}
