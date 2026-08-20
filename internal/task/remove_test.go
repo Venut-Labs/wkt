@@ -652,3 +652,88 @@ func TestRemoveRefusesOnServerKeyBesideDSStore(t *testing.T) {
 		t.Fatal("a real secret beside a regenerable OS artifact must still block removal without --force")
 	}
 }
+
+// --- Review finding Critical 1: Preflight scoped every content check to a
+// repository's WorktreePath, so content living at the tree root itself —
+// exactly where a session's working directory is, what "wkt path" prints —
+// was invisible to every check and silently deleted by os.RemoveAll(staged).
+
+func TestRemoveRefusesOnFileAtTreeRoot(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-root-file", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := filepath.Join(c.TreePath(task.Name), "PLAN.md")
+	if err := os.WriteFile(plan, []byte("cross-repo plan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_UNTRACKED_TREE_CONTENT" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a file at the tree root must be reported as untracked tree content, got %+v", blockers)
+	}
+
+	if err := Remove(c, "feat-root-file", false); err == nil {
+		t.Fatal("a file at the tree root must block removal without --force")
+	}
+	if _, statErr := os.Stat(plan); statErr != nil {
+		t.Fatal("the refused removal must not have deleted the tree-root file")
+	}
+}
+
+func TestRemoveRefusesOnFileInNewSubdirectoryOfTreeRoot(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-root-subdir", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(c.TreePath(task.Name), "scratch")
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scratchFile := filepath.Join(scratchDir, "out.json")
+	if err := os.WriteFile(scratchFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_UNTRACKED_TREE_CONTENT" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a file in a new subdirectory of the tree root must be reported as untracked tree content, got %+v", blockers)
+	}
+
+	if err := Remove(c, "feat-root-subdir", false); err == nil {
+		t.Fatal("a new subdirectory at the tree root must block removal without --force")
+	}
+	if _, statErr := os.Stat(scratchFile); statErr != nil {
+		t.Fatal("the refused removal must not have deleted the new subdirectory's content")
+	}
+
+	// Once the unexpected content is cleared away, removal must succeed —
+	// proving the new check does not fail closed permanently on an
+	// otherwise perfectly ordinary tree.
+	if err := os.RemoveAll(scratchDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-root-subdir", false); err != nil {
+		t.Fatalf("a clean tree must remove once the untracked content is gone: %v", err)
+	}
+}

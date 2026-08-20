@@ -178,9 +178,92 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		canon, _ := paths.Canonical(r.WorktreePath)
 		known[canon] = true
 	}
+
+	// 7b: untracked tree-root content (review Critical 1). Preflight's other
+	// checks all scope to a repository's WorktreePath, so content living at
+	// the tree root itself — a cross-repo plan, a generated report, agent
+	// scratch — was invisible to every check and simply vanished into
+	// os.RemoveAll(staged). Content *inside* a worktree is already fully
+	// covered by "git status --porcelain" above, so this only needs to
+	// classify entries that are not a descendant of a recorded worktree:
+	// every such entry must be the worktree's own root, a recorded link
+	// slot (symlink or copy), or a pure ancestor directory on the path to
+	// one of those — tree.Materialise already recorded every sibling of an
+	// ancestor as a link slot or copy at create time, so anything left over
+	// is exactly what an agent added afterward.
+	worktreeRel := map[string]bool{}
+	for _, r := range t.Repos {
+		worktreeRel[filepath.FromSlash(r.RelPath)] = true
+	}
+	linkRel := map[string]bool{}
+	copyHash := map[string]string{}
+	for _, slot := range t.Links {
+		rel := filepath.FromSlash(slot.RelPath)
+		linkRel[rel] = true
+		if slot.Type == "copy" {
+			copyHash[rel] = slot.Hash
+		}
+	}
+	sep := string(filepath.Separator)
+	underWorktree := func(rel string) bool {
+		for wt := range worktreeRel {
+			if strings.HasPrefix(rel, wt+sep) {
+				return true
+			}
+		}
+		return false
+	}
+	ancestorOfSomething := func(rel string) bool {
+		prefix := rel + sep
+		for wt := range worktreeRel {
+			if strings.HasPrefix(wt, prefix) {
+				return true
+			}
+		}
+		for ls := range linkRel {
+			if strings.HasPrefix(ls, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+
 	_ = filepath.WalkDir(treeRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+		if p != treeRoot {
+			if rel, relErr := filepath.Rel(treeRoot, p); relErr == nil {
+				rel = filepath.Clean(rel)
+				if !underWorktree(rel) {
+					switch {
+					case worktreeRel[rel]:
+						// a worktree's own root: fall through so the walk still
+						// descends into it below, for the foreign-.git scan.
+					case linkRel[rel]:
+						// a recorded link slot. A copy is not silently accepted
+						// on the strength of occupying the right path alone: if
+						// its hash no longer matches, it still falls through to
+						// the untracked-content blocker below, as a defence in
+						// depth alongside the dedicated WKT_COPY_DIVERGED check
+						// (section 8).
+						if wantHash, isCopy := copyHash[rel]; isCopy {
+							if sum, hErr := tree.Hash(p); hErr != nil || sum != wantHash {
+								out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
+							}
+						}
+					case ancestorOfSomething(rel):
+						// a real directory on the path to something recorded;
+						// fall through and keep descending.
+					default:
+						out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
+						if d.IsDir() {
+							return fs.SkipDir
+						}
+						return nil
+					}
+				}
+			}
 		}
 		// fs.WalkDir's SkipDir has two different meanings depending on the
 		// entry it's returned for: on a directory it means "don't descend
