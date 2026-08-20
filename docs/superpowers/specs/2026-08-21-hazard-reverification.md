@@ -140,3 +140,23 @@ happened two times in three.
 4. **H17 stays in the hazard register**, with both measurements and their
    conditions. The v0 decision to keep isolation out of the headline was made on
    more than H17 alone (§0, §4), and one non-reproduction does not reverse it.
+
+---
+
+## Addendum: the rule spelling is itself a hazard
+
+Discovered while implementing Task 2, by testing all three spellings of the
+same rule against the same write:
+
+| Rule | Result |
+|---|---|
+| `Edit(//Users/venut/…/g.txt)` | denied |
+| `Edit(///Users/venut/…/g.txt)` (`//` + an absolute path) | denied |
+| `Edit(/Users/venut/…/g.txt)` | **accepted by the parser, write succeeded** |
+
+The single-slash form is not rejected, warned about, or logged — it simply
+matches nothing. A perimeter written that way is a file that looks like a guard
+and is not one, which is the worst failure available to this feature. The
+generator therefore always emits `"Edit(//" + absolutePath`, and a test asserts
+the prefix on every rule it produces.
+

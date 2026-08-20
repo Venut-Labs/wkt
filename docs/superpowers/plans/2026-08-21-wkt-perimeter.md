@@ -161,7 +161,15 @@ with its own spec is worse than neither.
 
 ---
 
-### Task 2: `internal/perimeter` — render the document
+### Task 2: `internal/perimeter` — render the document — **DONE 2026-08-21**
+
+**Result:** `internal/perimeter`, 9 tests. The mutation check found two of them
+blind and both were fixed before this was called done: the own-tree guard was
+never reached because the fixture omitted the task's own name from the sibling
+list, and the rule-spelling test needed a mutation that actually drops the `//`
+prefix rather than one that merely moves a slash. Verified on 2.1.238 first:
+`Edit(//Users/x/f)` and `Edit(///Users/x/f)` both deny, `Edit(/Users/x/f)` is
+accepted and does nothing.
 
 **Files:**
 - Create: `internal/perimeter/perimeter.go`
@@ -206,13 +214,13 @@ with its own spec is worse than neither.
 - The task's own tree must **not** appear in its own deny list — that is the
   mistake H16 exists to describe.
 
-- [ ] **Step 1: Write the failing tests, one per requirement above**
-- [ ] **Step 2: Run them; confirm each fails for its own reason, not a shared compile error**
-- [ ] **Step 3: Implement**
-- [ ] **Step 4: Mutation check** — drop the store from `allowWrite`, then the
+- [x] **Step 1: Write the failing tests, one per requirement above**
+- [x] **Step 2: Run them; confirm each fails for its own reason, not a shared compile error**
+- [x] **Step 3: Implement**
+- [x] **Step 4: Mutation check** — drop the store from `allowWrite`, then the
       `/private` spelling, then the sibling enumeration. Each must turn a
       different test red. Restore.
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
