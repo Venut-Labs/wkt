@@ -106,9 +106,27 @@ func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *
 			continue
 		}
 		relSlash := filepath.ToSlash(rel)
-		if e.IsDir() {
+		// e.IsDir() is Lstat-based (os.ReadDir never follows symlinks), so a
+		// symlink — an ordinary workspace fixture like "current", "bin" or
+		// "data" — always reports false here, regardless of what it points
+		// at. Bucketing it into CopyFiles on that basis used to route it
+		// into copyFile, which os.Stat's (following the link): a symlink to
+		// a directory then opens successfully as a directory and the
+		// content copy fails, breaking "wkt new" on an ordinary symlink and
+		// naming the destination in the error without ever mentioning the
+		// symlink. An explicit Lstat here — rather than trusting
+		// DirEntry.Type(), which is not guaranteed populated on every
+		// platform — routes any symlink to a link slot instead: wkt creates
+		// its own symlink pointing at the workspace's, so the chain
+		// resolves exactly as it would from the workspace itself, whatever
+		// it ultimately points at.
+		info, statErr := os.Lstat(filepath.Join(abs, name))
+		switch {
+		case statErr != nil:
+			return wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot inspect a workspace entry").WithPath(filepath.Join(abs, name))
+		case info.Mode()&os.ModeSymlink != 0, info.IsDir():
 			p.LinkDirs = append(p.LinkDirs, relSlash)
-		} else {
+		default:
 			p.CopyFiles = append(p.CopyFiles, relSlash)
 		}
 	}

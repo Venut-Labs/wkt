@@ -345,3 +345,55 @@ func TestLinkDirRefusesWhenItHidesANestedRepoBelowTheDiscoveryBound(t *testing.T
 		t.Fatal("the refused link must never have been created — a shared writable slot must never exist")
 	}
 }
+
+// TestSymlinkedWorkspaceEntryRoutesToALinkSlotNotACopy reproduces review
+// finding Important 8: DirEntry.IsDir() is Lstat-based, so an ordinary
+// symlink at the workspace root — "current", "bin", "data": normal
+// workspace furniture — always reported false, bucketing it into
+// CopyFiles. copyFile then os.Stat's it (following the link), opens a
+// directory, and the content copy fails, breaking "wkt new" on the
+// symlink without ever naming it in the error.
+func TestSymlinkedWorkspaceEntryRoutesToALinkSlotNotACopy(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "releases", "v3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "releases", "v3", "marker.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(ws, "releases", "v3"), filepath.Join(ws, "current")); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := PlanFor(ws, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(p.LinkDirs, "current") {
+		t.Fatalf("a symlinked workspace entry must be planned as a link, got %+v", p)
+	}
+	for _, f := range p.CopyFiles {
+		if f == "current" {
+			t.Fatal("a symlink must never be routed to CopyFiles")
+		}
+	}
+
+	treeRoot := filepath.Join(base, "tree")
+	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Materialise(treeRoot, ws, p); err != nil {
+		t.Fatalf("materialising a symlinked workspace entry must not fail: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(treeRoot, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the tree's own slot for a symlinked entry must itself be a symlink, not a copy")
+	}
+	if _, err := os.Stat(filepath.Join(treeRoot, "current", "marker.txt")); err != nil {
+		t.Fatalf("the symlink chain must resolve to the real content: %v", err)
+	}
+}
