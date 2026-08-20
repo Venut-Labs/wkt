@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,6 +91,13 @@ func Load(dir, name string) (Task, error) {
 		return Task{}, wkterr.New("WKT_STATE_CORRUPT", "task state is not readable").
 			WithPath(path(dir, name)).WithFound(err.Error())
 	}
+	if t.SchemaVersion > SchemaVersion {
+		return Task{}, wkterr.New("WKT_STATE_VERSION", "task state was written by a newer wkt").
+			WithPath(path(dir, name)).
+			WithExpected(strconv.Itoa(SchemaVersion)).
+			WithFound(strconv.Itoa(t.SchemaVersion)).
+			WithRemedy("upgrade wkt")
+	}
 	return t, nil
 }
 
@@ -101,6 +109,9 @@ func List(dir string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
 		if strings.HasSuffix(e.Name(), ".json") {
 			out = append(out, strings.TrimSuffix(e.Name(), ".json"))
 		}
