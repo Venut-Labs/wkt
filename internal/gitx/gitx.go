@@ -16,7 +16,12 @@ func Run(dir string, args ...string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		first := strings.SplitN(strings.TrimSpace(errb.String()), "\n", 2)[0]
+		stderr := strings.TrimSpace(errb.String())
+		if stderr == "" {
+			// Fallback to exec error when stderr is empty
+			stderr = err.Error()
+		}
+		first := strings.SplitN(stderr, "\n", 2)[0]
 		return "", wkterr.New("WKT_GIT_FAILED", "git "+args[0]+" failed").
 			WithPath(dir).WithFound(first)
 	}
@@ -28,20 +33,27 @@ func RunOK(dir string, args ...string) bool {
 	return err == nil
 }
 
-func Version() (int, int, error) {
-	out, err := Run(".", "--version")
-	if err != nil {
-		return 0, 0, err
-	}
+func parseVersion(out string) (int, int, error) {
 	fields := strings.Fields(out) // "git version 2.50.1"
 	if len(fields) < 3 {
 		return 0, 0, wkterr.New("WKT_GIT_VERSION", "cannot parse git version").WithFound(out)
 	}
 	parts := strings.Split(fields[2], ".")
-	major, _ := strconv.Atoi(parts[0])
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, wkterr.New("WKT_GIT_VERSION", "cannot parse git version").WithFound(out)
+	}
 	minor := 0
 	if len(parts) > 1 {
 		minor, _ = strconv.Atoi(parts[1])
 	}
 	return major, minor, nil
+}
+
+func Version() (int, int, error) {
+	out, err := Run(".", "--version")
+	if err != nil {
+		return 0, 0, err
+	}
+	return parseVersion(out)
 }
