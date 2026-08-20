@@ -6,10 +6,12 @@
 package task
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"wkt/internal/container"
 	"wkt/internal/gitx"
@@ -19,19 +21,63 @@ import (
 	"wkt/internal/wkterr"
 )
 
+// Severity distinguishes a blocker that gates removal from one that is
+// merely reported. The zero value ("") means blocking, so every existing
+// code that never sets Severity keeps its original meaning unchanged.
 type Blocker struct {
-	Code   string
-	Repo   string
-	Path   string
-	Detail string
+	Code     string
+	Repo     string
+	Path     string
+	Detail   string
+	Severity string // "" (blocking, default) or "info" (listed, not blocking)
 }
 
-var preciousPatterns = []string{".env", ".env.", "credentials", "id_rsa", ".pem"}
+// regenerable lists path-component sequences that mark git-ignored content
+// as safe to delete without a warning: build output and dependency caches
+// any build system regenerates on demand. This is deliberately an
+// allowlist, not a denylist. A denylist of "precious" filename substrings
+// was tried first and failed the one property that matters here: it cannot
+// be made complete. A gitignored "server.key" — an entirely ordinary TLS or
+// SSH private key name — matched none of its five entries and was deleted
+// with zero blockers and no --force. Now unknown ignored content blocks by
+// default; only what's provably regenerable is exempt, and even that is
+// still reported, not silently passed over (see the "info" Severity below).
+var regenerable = [][]string{
+	{"node_modules"}, {"dist"}, {"build"}, {"target"},
+	{".venv"}, {"venv"}, {".next"}, {".nuxt"},
+	{"__pycache__"}, {".pytest_cache"}, {"coverage"},
+	{".gradle"}, {".tox"}, {"vendor", "bundle"}, {".terraform"},
+}
 
-func isPrecious(name string) bool {
-	lower := strings.ToLower(name)
-	for _, p := range preciousPatterns {
-		if strings.HasPrefix(lower, p) || strings.Contains(lower, p) {
+// isRegenerable reports whether relPath — git's own slash-separated,
+// repo-relative reporting of an ignored path — contains one of the
+// regenerable sequences as whole path components. It never matches a bare
+// substring: "target" matches ".../target/..." but not
+// ".../my-target-cache/...", and a name like "server.key" never matches
+// anything here at all, which is the point.
+func isRegenerable(relPath string) bool {
+	comps := strings.Split(strings.TrimSuffix(relPath, "/"), "/")
+	for _, seq := range regenerable {
+		if containsComponentSequence(comps, seq) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsComponentSequence(comps, seq []string) bool {
+	if len(seq) > len(comps) {
+		return false
+	}
+	for i := 0; i+len(seq) <= len(comps); i++ {
+		match := true
+		for j, s := range seq {
+			if comps[i+j] != s {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
@@ -60,16 +106,22 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		} else if s != "" {
 			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: firstLine(s)})
 		}
-		// 3: ignored-but-precious. git's own refusal never fires on these (H1).
+		// 3: ignored content. git's own refusal never fires on any of it (H1).
+		// A bulk-ignored directory collapses to one "!! dir/" line — its
+		// contents are never listed individually — so an allowlisted
+		// directory is trusted whole, and an unrecognised one blocks whole:
+		// unknown means precious, not just unknown-named files.
 		if s, err := gitx.Run(wt, "status", "--porcelain", "--ignored=matching"); err == nil {
 			for _, line := range strings.Split(s, "\n") {
 				if !strings.HasPrefix(line, "!! ") {
 					continue
 				}
-				name := filepath.Base(strings.TrimPrefix(line, "!! "))
-				if isPrecious(name) {
-					out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: name})
+				rel := strings.TrimPrefix(line, "!! ")
+				if isRegenerable(rel) {
+					out = append(out, Blocker{Code: "WKT_REGENERABLE_IGNORED", Repo: r.RelPath, Path: rel, Severity: "info"})
+					continue
 				}
+				out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: rel})
 			}
 		}
 		// 4: in-progress operations — invisible to status --porcelain (H2):
@@ -223,11 +275,19 @@ func Remove(c container.C, name string, force bool) error {
 	if err != nil {
 		return err
 	}
-	blockers, err := Preflight(c, t)
+	all, err := Preflight(c, t)
 	if err != nil {
 		return err
 	}
-	for _, b := range blockers {
+	// Severity "info" entries (regenerable ignored content) are reported but
+	// never gate removal or the force decision — only the blocking ones do.
+	var blocking []Blocker
+	for _, b := range all {
+		if b.Severity != "info" {
+			blocking = append(blocking, b)
+		}
+	}
+	for _, b := range blocking {
 		if b.Code == "WKT_FOREIGN_REPO" {
 			return wkterr.New(b.Code, "a repository wkt did not create lives inside the tree").
 				WithPath(b.Path).WithRemedy("move it out of the tree, then retry")
@@ -237,10 +297,17 @@ func Remove(c container.C, name string, force bool) error {
 				WithRepo(b.Repo).WithRemedy("push the submodule's commits", "git submodule deinit", "then retry")
 		}
 	}
-	if len(blockers) > 0 && !force {
+	if len(blocking) > 0 && !force {
 		e := wkterr.New("WKT_WOULD_LOSE_WORK", "removal would lose work")
-		for _, b := range blockers {
-			e = e.WithRemedy(b.Code + " " + b.Repo + " " + b.Path + " " + b.Detail)
+		// List every entry, blocking and informational alike, so --force
+		// doesn't become reflexive: the user sees that most of what's in the
+		// way is build output, and one line is their .env (spec §5.7).
+		for _, b := range all {
+			line := b.Code
+			if b.Severity == "info" {
+				line = "(not blocking) " + line
+			}
+			e = e.WithRemedy(line + " " + b.Repo + " " + b.Path + " " + b.Detail)
 		}
 		return e
 	}
@@ -251,9 +318,20 @@ func Remove(c container.C, name string, force bool) error {
 		return wkterr.New("WKT_STAGING", "cannot create the staging directory").WithPath(c.StagingDir())
 	}
 	if err := os.Rename(treeRoot, staged); err != nil {
-		return wkterr.New("WKT_STAGING", "cannot move the tree into staging").
+		// Degrading the fence to a per-repo, non-atomic sequence when
+		// staging/ is on another filesystem would defeat the reason the
+		// fence exists (a still-running agent's cwd must vanish atomically),
+		// so this refuses rather than falling back. Name the cause when it's
+		// the well-known one (EXDEV) instead of only echoing the raw OS
+		// error, so the remedy is actionable on first read.
+		msg := "cannot move the tree into staging"
+		remedy := "relocate the container so its trees/ and staging/ share one filesystem, then retry"
+		if errors.Is(err, syscall.EXDEV) {
+			msg = "the tree and staging/ are on different filesystems, so the removal fence cannot be atomic"
+		}
+		return wkterr.New("WKT_STAGING", msg).
 			WithPath(treeRoot).WithFound(err.Error()).
-			WithRemedy("if staging is on another filesystem, relocate the container")
+			WithRemedy(remedy)
 	}
 
 	for _, r := range t.Repos {

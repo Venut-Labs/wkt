@@ -307,3 +307,242 @@ func TestRemoveRefusesOnDivergedCopiedFile(t *testing.T) {
 		t.Fatal("the refused removal must not have deleted the diverged copy")
 	}
 }
+
+// --- Round 2: the precious-file classifier was inverted from a denylist of
+// five substrings (proven to miss ordinary secrets like "server.key" with
+// zero blockers) to an allowlist of provably regenerable path components.
+// Unknown ignored content now blocks by default.
+
+func TestRemoveRefusesOnIgnoredKeyFileNotOnAnyDenylist(t *testing.T) {
+	c, entries := fixture(t)
+	// "server.key" is an entirely ordinary TLS/SSH private key name. It
+	// matched none of the old classifier's five substrings
+	// (".env", ".env.", "credentials", "id_rsa", ".pem") and was deleted
+	// with zero blockers and no --force — the exact condition this check
+	// exists for.
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("server.key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore server.key")
+	entries, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-key", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(task.Repos[0].WorktreePath, "server.key")
+	if err := os.WriteFile(keyPath, []byte("-----BEGIN PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(c, "feat-key", false); err == nil {
+		t.Fatal("an ignored private key must block removal even though its name isn't on any hardcoded denylist")
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatal("the refused removal must not have deleted the key")
+	}
+}
+
+func TestRemoveRefusesOnBulkIgnoredDirectoryNotOnAllowlist(t *testing.T) {
+	c, entries := fixture(t)
+	// git status collapses a wholly-ignored directory to a single
+	// "!! secrets/" line — its contents are never listed individually — so
+	// the classifier must treat an unrecognised directory name as precious
+	// as a whole, not inspect (and miss) files inside it one by one.
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("secrets/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore secrets")
+	entries, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-secrets", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsDir := filepath.Join(task.Repos[0].WorktreePath, "secrets")
+	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "api_token"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a bulk-ignored, unrecognised directory must block as a whole, got %+v", blockers)
+	}
+
+	if err := Remove(c, "feat-secrets", false); err == nil {
+		t.Fatal("a bulk-ignored unrecognised directory must block removal")
+	}
+}
+
+func TestRemoveListsRegenerableIgnoredContentButDoesNotBlockOnIt(t *testing.T) {
+	c, entries := fixture(t)
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore node_modules")
+	entries, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-nm", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nm := filepath.Join(task.Repos[0].WorktreePath, "node_modules", "leftpad")
+	if err := os.MkdirAll(nm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nm, "index.js"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawInfo bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" {
+			t.Fatalf("node_modules must not be flagged as precious, got %+v", b)
+		}
+		if b.Code == "WKT_REGENERABLE_IGNORED" && b.Severity == "info" {
+			sawInfo = true
+		}
+	}
+	if !sawInfo {
+		t.Fatalf("a regenerable ignored directory must still be listed (as info), got %+v", blockers)
+	}
+
+	// This is the whole point of listing it: --force must not be needed
+	// when the only ignored content is provably regenerable.
+	if err := Remove(c, "feat-nm", false); err != nil {
+		t.Fatalf("a tree whose only ignored content is regenerable must remove cleanly without --force: %v", err)
+	}
+}
+
+// TestRemoveRefusesOnLinkSlotReplacedByRegularFile guards WKT_LINK_SLOT_CHANGED,
+// which had no test at all — proven by mutation: disabling that branch left
+// every other test in the package passing. An atomic save (write a temp
+// file, then rename it over the target) replaces the symlink itself with a
+// regular file, unlike a naive write through the symlink, which would leave
+// the link intact.
+func TestRemoveRefusesOnLinkSlotReplacedByRegularFile(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-linkchange", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	docsLink := filepath.Join(c.TreePath("feat-linkchange"), "docs")
+	if info, statErr := os.Lstat(docsLink); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("test setup invariant broken: docs must be a symlink slot, got info=%v err=%v", info, statErr)
+	}
+
+	tmp := docsLink + ".atomic-tmp"
+	if err := os.WriteFile(tmp, []byte("replaced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, docsLink); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, b := range blockers {
+		if b.Code == "WKT_LINK_SLOT_CHANGED" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("a link slot replaced by a regular file must block removal, got %+v", blockers)
+	}
+
+	if err := Remove(c, "feat-linkchange", false); err == nil {
+		t.Fatal("a changed link slot must block removal without --force")
+	}
+}
+
+// TestPreflightDetectsEachInProgressMarker table-drives all six markers
+// individually. Previously only BISECT_LOG was exercised (indirectly, via a
+// real bisect); a regression dropping e.g. MERGE_HEAD from the Go slice
+// would have gone unnoticed. Each marker's real on-disk location is
+// resolved via "git rev-parse --git-path" exactly as Preflight itself
+// resolves it, then created directly — rebase-merge/rebase-apply are
+// directories, the rest are files — so the test targets precisely the
+// regression class at risk (the marker's name being dropped from the list),
+// without depending on git's internal machinery to reach six different
+// real operational states, several of which (conflict-driven MERGE_HEAD,
+// CHERRY_PICK_HEAD, REVERT_HEAD) would also show up in plain "git status"
+// and so would not by themselves prove this check is pulling its weight.
+func TestPreflightDetectsEachInProgressMarker(t *testing.T) {
+	markers := []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}
+	for _, marker := range markers {
+		t.Run(marker, func(t *testing.T) {
+			c, entries := fixture(t)
+			task, err := Create(c, entries, "feat-marker", []string{"docs"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wt := task.Repos[0].WorktreePath
+
+			p := strings.TrimSpace(g(t, wt, "rev-parse", "--git-path", marker))
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(wt, p)
+			}
+			if marker == "rebase-merge" || marker == "rebase-apply" {
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			blockers, err := Preflight(c, task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saw bool
+			for _, b := range blockers {
+				if b.Code == "WKT_IN_PROGRESS" && b.Detail == marker {
+					saw = true
+				}
+			}
+			if !saw {
+				t.Fatalf("marker %q must be individually detected, got %+v", marker, blockers)
+			}
+		})
+	}
+}

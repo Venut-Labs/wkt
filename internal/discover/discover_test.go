@@ -196,6 +196,62 @@ func TestWalkClassifiesSubmoduleWithWorktreesInPath(t *testing.T) {
 	}
 }
 
+// TestWalkFindsNestedRepoInsideLinkedWorktree is a regression guard for the
+// same fs.WalkDir SkipDir asymmetry fixed in internal/task/remove.go's
+// foreign-repo walk (round 2 review): a linked worktree's own ".git" is
+// always a regular *file*, not a directory, so returning SkipDir
+// unconditionally on it (rather than only when d.IsDir()) skipped the rest
+// of that worktree's own siblings — hiding any nested repository sorting
+// after ".git" (almost anything) from discovery entirely. Narrower blast
+// radius than the remove.go instance (it truncates within one repository's
+// own subtree, not across the whole tree root), but the same shape.
+func TestWalkFindsNestedRepoInsideLinkedWorktree(t *testing.T) {
+	ws := t.TempDir()
+	repo := filepath.Join(ws, "svc-a")
+	gitInit(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "init"}} {
+		cmd := exec.Command("git", append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	wt := filepath.Join(ws, "svc-a-wt")
+	cmd := exec.Command("git", "worktree", "add", "-q", wt)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %s", out)
+	}
+	// A repository nested inside the linked worktree's own directory,
+	// sorting after ".git" alphabetically — the condition the bug depended
+	// on, since ".git" is visited first in a sorted directory listing.
+	nested := filepath.Join(wt, "zzz-nested")
+	gitInit(t, nested)
+
+	entries, err := Walk(ws, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawWorktree, sawNested bool
+	for _, e := range entries {
+		if e.RelPath == "svc-a-wt" {
+			sawWorktree = true
+		}
+		if e.RelPath == "svc-a-wt/zzz-nested" {
+			sawNested = true
+		}
+	}
+	if !sawWorktree {
+		t.Fatalf("the linked worktree itself must still be discovered: %v", entries)
+	}
+	if !sawNested {
+		t.Fatalf("a repository nested inside a linked worktree's own directory must be discovered, got %+v", entries)
+	}
+}
+
 func TestWalkFindsNearestContainingRepository(t *testing.T) {
 	ws := t.TempDir()
 	gitInit(t, filepath.Join(ws, "outer"))

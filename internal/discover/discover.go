@@ -53,7 +53,21 @@ func Walk(workspace string, maxDepth int) ([]Entry, error) {
 		repoRel, _ := filepath.Rel(root, repoDir)
 		e := Entry{RelPath: filepath.ToSlash(repoRel), AbsPath: repoDir, Kind: classify(p, repoDir)}
 		out = append(out, e)
-		return fs.SkipDir // do not descend into a repository's own .git
+		// fs.WalkDir's SkipDir means "don't descend into this" only when the
+		// visited entry is itself a directory; on a non-directory entry it
+		// instead means "skip the rest of this directory's siblings" — a
+		// linked worktree or submodule checkout's ".git" is always a regular
+		// *file*, so returning SkipDir unconditionally here silently
+		// truncated the scan of the rest of that repository's own subtree
+		// right after visiting its own marker, hiding any nested repository
+		// sorting after ".git" (almost anything). Only an actual ".git"
+		// *directory* should stop descent — the same fix already applied in
+		// internal/task/remove.go's foreign-repo walk (round 2 review),
+		// confirmed there against real fs.WalkDir before being ported here.
+		if d.IsDir() {
+			return fs.SkipDir // do not descend into a repository's own .git directory
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
