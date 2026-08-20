@@ -700,29 +700,49 @@ Every path appears in **all known spellings** — as typed, `realpath`, and the
 macOS `/private` form. Deny globs are lexical: an alias such as
 `~/work -> /Volumes/Data/work` defeats a single spelling entirely.
 
-**The two lists have different cost models, and this is load-bearing (H17).**
-The `sandbox.filesystem` paths are compiled into a profile passed to *every*
-Bash command through `exec`, so their count is bounded by `kern.argmax`; that
-list must stay **constant-size** — seven paths in three spellings, never growing
-with the number of tasks. Sibling trees are therefore absent from it, and they do
-not need to be: sandboxed Bash writes are already confined to the working
-directory by default, so a sibling tree is closed without being named.
+**The two lists are one list, and that was measured the hard way**
+(`2026-08-21-hazard-reverification.md`, Claude Code 2.1.238). An earlier
+revision of this section claimed `permissions.deny` was evaluated inside Claude
+Code and never passed through `exec`, making a per-task deny affordable at any
+count. That is false: the settings schema says `denyWrite` is "merged with paths
+from `Edit(...)` deny permission rules", and an `Edit(...)` deny rule was
+verified to block the **Bash** tool from writing a file inside the session's own
+working directory — where the control run, identical but for the rule, wrote it
+successfully.
 
-The `permissions.deny` entries are evaluated inside Claude Code and are not
-passed through `exec`, so enumerating sibling trees there is safe at any count.
-That asymmetry is the only reason a per-task deny is affordable at all.
+So one `permissions.deny` list covers both the file-editing tools and Bash, and
+the paths need not be restated under `sandbox.filesystem`; what that section
+still carries is `allowWrite` on the store (mandatory, H5) and `denyRead` on
+credential directories.
+
+The cost model applies to the whole list, measured on macOS:
+
+| Deny paths | Behaviour |
+|---|---|
+| ~5,000 | works, rules enforce |
+| ~9,000 | `sandbox-exec: profile compilation failed` — **every** Bash command fails |
+| ~20,000 | `E2BIG` at spawn; Claude Code reports "the Bash sandbox profile adds N filesystem deny paths to every command" |
+
+Both failure modes are fail-closed. Seven paths in three spellings plus three
+per sibling tree puts a 20-task workspace near 80 paths and a 500-task one under
+2,000 — comfortable, but the generator must never let the list grow unbounded,
+because past the bound the tool does not degrade, it stops.
 
 **Stated limitations**, all of which belong in the README:
 
-- **The Bash half is advisory (H17).** After a refusal, Claude Code was observed
-  re-running the command with `dangerouslyDisableSandbox: true` on its own
-  initiative, and the write landed — 4 runs in 6. Nothing `wkt` generates
-  prevents this.
+- **The Bash half may be advisory (H17).** On 2.1.220, after a refusal, Claude
+  Code was observed re-running the command with `dangerouslyDisableSandbox:
+  true` on its own initiative, and the write landed — 4 runs in 6. On 2.1.238
+  this did not reproduce in 7 headless runs across two models: the agent stopped
+  and handed the decision back, twice naming the bypass and declining to take it
+  unilaterally. Not reproduced is not fixed — interactive sessions and other
+  permission modes were not tested — so nothing `wkt` generates should be
+  described as preventing it.
 - **A perimeter file covers only the directory it sits in (H6a).** `wkt` writes a
   copy at the tree root and at each materialised repository root; a session
   started deeper — `<tree>/services/svc-a/src` — has **no perimeter at all**.
-  Verified: the same workspace write is refused from the repository root and
-  succeeds one directory below it. Materialising a copy into every directory is
+  Verified on 2.1.220 and again on 2.1.238: the same write is refused from the
+  covered directory and succeeds one directory below it. Materialising a copy into every directory is
   unbounded and litters the user's repositories, so v0 documents the limit and
   `wkt status` reports which directories are covered.
 - Sibling trees are enumerated by name in `permissions.deny`, not by a glob,
@@ -1037,11 +1057,20 @@ budget on the explicitly de-prioritised feature was incoherent.
 For reference, the version that kept it was estimated at 18–26 weeks, and §7.2
 carries an ongoing per-release verification tax: Claude Code shipped 2.1.220 →
 2.1.236 in under four weeks, and the hooks and sandbox surfaces are exactly what
-changed.
+changed. Re-measured on 2.1.238 (`2026-08-21-hazard-reverification.md`), where
+one load-bearing claim in §5.6 turned out to be false — the tax is real and it
+is not optional.
 
 The hazard register is more credible saying "here is where isolation breaks and
-here is why we did not sell it" than shipping a perimeter command whose guarantee
-has a 20-task ceiling.
+here is why we did not sell it" than shipping a perimeter command and calling the
+result isolation.
+
+*Amended 2026-08-21.* This paragraph originally ended "…whose guarantee has a
+20-task ceiling". That ceiling was inferred, not measured, and the measurement
+does not support it: the deny list works at ~5,000 paths, which is a 500-task
+workspace. The reasons the perimeter stayed out of v0 stand on §0 and §4 — it is
+not the headline and it only prevents accidents — not on a limit that turned out
+not to exist. See `2026-08-21-hazard-reverification.md`.
 
 Build order: `init` → store, two remotes and base pins → perimeter generator
 (`new` writes the file, so it cannot come later) → `new` (two-phase) →

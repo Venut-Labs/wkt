@@ -63,15 +63,21 @@ spellings, fail closed). Additionally:
 - **No isolation claim, anywhere.** Not in the README, not in `status` output,
   not in an error message. The perimeter prevents accidents (spec §0). `status`
   reports *coverage*, never "isolated" (§5.6, §9).
-- **The `sandbox.filesystem` list is constant-size.** It is compiled into a
-  profile passed through `exec` to every Bash command, so it is bounded by
-  `kern.argmax` (H17): seven paths in three spellings, never growing with the
-  number of tasks. Sibling trees are named only in `permissions.deny`, which
-  Claude Code evaluates internally and never passes through `exec`.
-- **The Bash half is advisory and must be described as such.** H17 observed
-  Claude Code re-running a refused command with `dangerouslyDisableSandbox: true`
-  on its own initiative, and the write landing, in 4 runs of 6. Generate it —
-  it costs little — but never let a message imply it is a boundary.
+- **One deny list covers both halves, and it is bounded.** Task 1 measured this
+  (`2026-08-21-hazard-reverification.md`): `Edit(...)` deny rules are merged into
+  the Bash sandbox profile, so they need not be restated under
+  `sandbox.filesystem` — but every rule is compiled into the profile passed to
+  *every* command. It works at ~5,000 paths; at ~9,000 the profile stops
+  compiling and **all** Bash fails; at ~20,000 the spawn fails with `E2BIG`.
+  Both failure modes are fail-closed, and the generator must keep the total
+  proportional to the number of tasks (roughly 3 paths per sibling), never to
+  anything unbounded. `sandbox.filesystem` still carries `allowWrite` on the
+  store (H5) and `denyRead` on credential directories.
+- **The Bash half may still be advisory, and must never be sold as a boundary.**
+  On 2.1.220 the agent re-ran a refused command with
+  `dangerouslyDisableSandbox: true` and the write landed, 4 runs in 6. On
+  2.1.238 that did not reproduce in 7 headless runs (Task 1) — but not
+  reproduced is not fixed, and interactive sessions were not tested.
 - **A perimeter file covers only the directory it sits in** (H6a). Copies go to
   the tree root and to each materialised repository root. A session started
   deeper is uncovered, and `status` must say so rather than implying otherwise.
@@ -86,7 +92,12 @@ spellings, fail closed). Additionally:
 
 ---
 
-### Task 1: Re-verify the hazard register against Claude Code 2.1.238
+### Task 1: Re-verify the hazard register against Claude Code 2.1.238 — **DONE 2026-08-21**
+
+**Result:** `docs/superpowers/specs/2026-08-21-hazard-reverification.md`. H6a,
+H13 and H16 confirmed; H17 not reproduced in 7 runs; one load-bearing §5.6 claim
+disproved (deny rules *are* merged into the Bash profile) and the spec amended.
+The tasks below already reflect it.
 
 **Why first:** every design decision below rests on behaviour last measured on
 2.1.220. Spec §9 warns that this verification is a recurring tax and that "the
@@ -111,7 +122,7 @@ already two versions on.
   "could not reproduce", not "fixed". H9 in particular fires only on one entry
   path.
 
-- [ ] **Step 1: Confirm the hook contract as shipped**
+- [x] **Step 1: Confirm the hook contract as shipped**
 
 The installed binary documents `WorktreeCreate` as: input JSON carrying `name`
 (a suggested slug), stdout carrying the absolute path to the created worktree,
@@ -122,19 +133,19 @@ than emitting `hookSpecificOutput`, which is what makes `wkt new`'s existing
 output already contract-shaped — and record whether the payload still matches
 H14's description.
 
-- [ ] **Step 2: Re-run H6a — the perimeter covers only its own directory**
+- [x] **Step 2: Re-run H6a — the perimeter covers only its own directory**
 
 With a perimeter file at a repository root, attempt the same denied write from
 that root and from one directory below it. H6a claims the first is refused and
 the second succeeds. Record both.
 
-- [ ] **Step 3: Re-run H16 — a narrower allow does not escape a broader deny**
+- [x] **Step 3: Re-run H16 — a narrower allow does not escape a broader deny**
 
 This is what forces sibling trees to be enumerated by name rather than caught by
 a glob. If it no longer holds, Task 3's deny list gets much smaller and the
 20-task ceiling in §9 disappears — a result worth knowing before writing it.
 
-- [ ] **Step 4: Re-run H13 and H17**
+- [x] **Step 4: Re-run H13 and H17**
 
 H13: the agent cannot rewrite or delete a perimeter copy protected by
 `sandbox.filesystem.denyWrite` — the foundation spec records this as verified
@@ -142,7 +153,7 @@ against the Write tool, a Bash redirect and `rm -f`. H17: after a refusal, does
 the agent still retry with `dangerouslyDisableSandbox`? Run it enough times to
 report a ratio, as H17 itself does, not a single anecdote.
 
-- [ ] **Step 5: Record and commit**
+- [x] **Step 5: Record and commit**
 
 Write the findings file. Where a result contradicts the spec, amend the spec in
 the same commit and say so in the message — a hazard register that disagrees
@@ -171,13 +182,19 @@ with its own spec is worse than neither.
   tree by name, the store's `hooks/` and `config`, and the task's own `.claude/`
   and `.wkt/`.
 - `sandbox.filesystem.allowWrite` **must** include the store: the task's gitdir
-  lives there and denying it breaks `git add` (H5). The narrower `denyWrite`
-  entries for `hooks/` and `config` still win — that composition is the point.
+  lives there and denying it breaks `git add` (H5). The narrower deny entries for
+  `hooks/` and `config` still win — that composition is the point, and H16 was
+  re-confirmed in Task 1, so it is deny that wins, never the narrower allow.
+- Deny paths are **not** duplicated under `sandbox.filesystem.denyWrite`: Task 1
+  verified they are merged from the `Edit(...)` rules already. Duplicating them
+  doubles the profile that every Bash command carries, for nothing.
 - Every path appears in all known spellings (`paths.Spellings`), because deny
   globs are lexical and an aliased workspace defeats a single spelling.
-- The `sandbox.filesystem` list stays **constant-size** as the number of tasks
-  grows; `permissions.deny` grows with siblings. A test must assert exactly
-  this, by rendering with 1 sibling and with 40 and comparing both lengths.
+- The total path count grows only with the number of siblings, about three per
+  sibling. A test must render with 1 sibling and with 40 and assert the growth
+  is linear and small — and a second test must assert the document stays under a
+  hard cap (say 2,000 paths) or refuses with a typed error, because past ~9,000
+  every Bash command in that session fails rather than degrading.
 - `denyRead` covers `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.claude`.
 
 **Traps:**
