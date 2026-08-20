@@ -47,6 +47,17 @@ var regenerable = [][]string{
 	{".venv"}, {"venv"}, {".next"}, {".nuxt"},
 	{"__pycache__"}, {".pytest_cache"}, {"coverage"},
 	{".gradle"}, {".tox"}, {"vendor", "bundle"}, {".terraform"},
+	// Operating-system artifacts: recreated automatically by the OS/file
+	// manager and never carry any work of their own. Without these, a
+	// gitignored ".DS_Store" (which Finder writes into essentially every
+	// directory a macOS user has so much as opened, and which nearly every
+	// macOS repository gitignores) would make "wkt rm" refuse on almost
+	// every real tree on the primary development platform — teaching
+	// people to reach for --force without reading the list, which defeats
+	// the reason this check exists at all, including for the "server.key"
+	// case it was just fixed to catch.
+	{".DS_Store"}, {"Thumbs.db"}, {".Spotlight-V100"}, {".fseventsd"},
+	{".Trashes"}, {"desktop.ini"},
 }
 
 // isRegenerable reports whether relPath — git's own slash-separated,

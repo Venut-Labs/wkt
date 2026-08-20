@@ -546,3 +546,109 @@ func TestPreflightDetectsEachInProgressMarker(t *testing.T) {
 		})
 	}
 }
+
+// --- Round 3: .DS_Store and other OS artifacts added to the regenerable
+// allowlist. Finder writes ".DS_Store" into essentially every directory a
+// macOS user opens, and nearly every macOS repository gitignores it; left
+// blocking, "wkt rm" would refuse on almost every real tree on the primary
+// development platform, teaching people to reach for --force without
+// reading the list — the exact reflex the classifier inversion exists to
+// prevent.
+
+func TestRemoveListsDSStoreButDoesNotBlockOnIt(t *testing.T) {
+	c, entries := fixture(t)
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".DS_Store\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore .DS_Store")
+	entries, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-dsstore", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsStore := filepath.Join(task.Repos[0].WorktreePath, ".DS_Store")
+	if err := os.WriteFile(dsStore, []byte("finder metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawInfo bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" {
+			t.Fatalf(".DS_Store must not be flagged as precious, got %+v", b)
+		}
+		if b.Code == "WKT_REGENERABLE_IGNORED" && b.Severity == "info" {
+			sawInfo = true
+		}
+	}
+	if !sawInfo {
+		t.Fatalf(".DS_Store must still be listed (as info), got %+v", blockers)
+	}
+
+	// The whole point: --force must not be needed just because Finder wrote
+	// a metadata file into the tree.
+	if err := Remove(c, "feat-dsstore", false); err != nil {
+		t.Fatalf("a tree whose only ignored content is .DS_Store must remove cleanly without --force: %v", err)
+	}
+}
+
+func TestRemoveRefusesOnServerKeyBesideDSStore(t *testing.T) {
+	c, entries := fixture(t)
+	// The regenerable addition must not mask a real secret sitting right
+	// next to an OS artifact in the same ignored listing.
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".DS_Store\nserver.key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore .DS_Store and server.key")
+	entries, err := discover.Walk(c.Workspace, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-dsstore-key", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := task.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, ".DS_Store"), []byte("finder metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "server.key"), []byte("-----BEGIN PRIVATE KEY-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawPrecious, sawInfo bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" {
+			sawPrecious = true
+		}
+		if b.Code == "WKT_REGENERABLE_IGNORED" {
+			sawInfo = true
+		}
+	}
+	if !sawPrecious {
+		t.Fatalf("server.key must still block even beside a regenerable .DS_Store, got %+v", blockers)
+	}
+	if !sawInfo {
+		t.Fatalf(".DS_Store beside it should still be listed as regenerable, got %+v", blockers)
+	}
+
+	if err := Remove(c, "feat-dsstore-key", false); err == nil {
+		t.Fatal("a real secret beside a regenerable OS artifact must still block removal without --force")
+	}
+}
