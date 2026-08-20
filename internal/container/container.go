@@ -22,6 +22,10 @@ func (c C) TreesDir() string   { return filepath.Join(c.Root, "trees") }
 func (c C) StateDir() string   { return filepath.Join(c.Root, "state", "tasks") }
 func (c C) StagingDir() string { return filepath.Join(c.Root, "staging") }
 
+// ConfigDir holds the container's own state, as opposed to StateDir, which
+// holds one file per task.
+func (c C) ConfigDir() string { return filepath.Join(c.Root, "state") }
+
 func (c C) TreePath(task string) string { return filepath.Join(c.TreesDir(), task) }
 
 func Locate(workspace string) (C, error) {

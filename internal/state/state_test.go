@@ -166,3 +166,49 @@ func TestLoadRejectsNewerSchemaVersion(t *testing.T) {
 		t.Fatalf("error must mention WKT_STATE_VERSION: %v", err)
 	}
 }
+
+// TestContainerStateRoundTrips covers adversarial finding F4: init's
+// --exclude decision has to survive the command that made it, because spec
+// §5.3 rule 6 calls it "recorded in container state" — a workspace whose
+// nested repository is excluded must stay adoptable on every later run.
+func TestContainerStateRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveContainer(dir, Container{Excluded: []string{"a/inner", "b/deep"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadContainer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Excluded) != 2 || got.Excluded[0] != "a/inner" {
+		t.Fatalf("excluded paths must round-trip, got %+v", got)
+	}
+	if got.SchemaVersion != SchemaVersion {
+		t.Fatalf("save must stamp the schema version, got %d", got.SchemaVersion)
+	}
+}
+
+// TestLoadContainerOnAFreshContainerIsEmptyNotAnError pins the ordinary case:
+// a container that has never excluded anything has no file at all.
+func TestLoadContainerOnAFreshContainerIsEmptyNotAnError(t *testing.T) {
+	got, err := LoadContainer(t.TempDir())
+	if err != nil {
+		t.Fatalf("a missing container file is the normal state, got %v", err)
+	}
+	if len(got.Excluded) != 0 {
+		t.Fatalf("want nothing excluded, got %+v", got)
+	}
+}
+
+// TestLoadContainerRejectsANewerSchema mirrors the task-state guard: a file
+// written by a future binary must not be misparsed by this one.
+func TestLoadContainerRejectsANewerSchema(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "container.json"),
+		[]byte(`{"schema_version":99,"excluded":["x"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadContainer(dir); err == nil {
+		t.Fatal("a newer schema version must be refused, not read")
+	}
+}

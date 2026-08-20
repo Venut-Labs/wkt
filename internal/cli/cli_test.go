@@ -732,3 +732,77 @@ func TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule(t *testing.T) {
 		t.Fatalf("new must warn on stderr that super carries a submodule, got %q", errb.String())
 	}
 }
+
+// TestInitExcludeAdoptsAWorkspaceWithANestedRepository covers adversarial
+// finding F4. Spec §5.3 rule 6 and the §7.1 command table both promise
+// --exclude as the escape hatch for a genuine nested repository; without it,
+// init refuses and a workspace containing one cannot be adopted at all.
+func TestInitExcludeAdoptsAWorkspaceWithANestedRepository(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "a", "inner"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("a genuine nested repository must be refused without --exclude")
+	}
+	if !strings.Contains(errb.String(), "WKT_NESTED_REPO") {
+		t.Fatalf("want WKT_NESTED_REPO, got %s", errb.String())
+	}
+	// The refusal has to name the way out, or the user is stuck.
+	if !strings.Contains(errb.String(), "--exclude") {
+		t.Fatalf("the refusal must point at --exclude: %s", errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"init", "--exclude", "a/inner", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("--exclude must adopt the workspace, exited %d: %s", code, errb.String())
+	}
+
+	// Recorded in container state: a later run must not need the flag again.
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the exclusion must be remembered, exited %d: %s", code, errb.String())
+	}
+
+	// And the workspace is usable: a task over the outer repository works.
+	out.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+}
+
+// TestInitExcludeRefusesAPathThatIsNotANestedRepository keeps the flag from
+// becoming a silent no-op for a typo, the same failure shape as defect 24.
+func TestInitExcludeRefusesAPathThatIsNotANestedRepository(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "a", "inner"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--exclude", "a/typo", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("excluding something that is not a nested repository must fail")
+	}
+	if !strings.Contains(errb.String(), "WKT_NO_SUCH_NESTED_REPO") {
+		t.Fatalf("want WKT_NO_SUCH_NESTED_REPO, got %s", errb.String())
+	}
+	// Excluding the *outer* repository is not what the flag is for either:
+	// it is not nested, and dropping it would leave its directory to be
+	// linked whole, hiding a repository inside a shared writable link.
+	errb.Reset()
+	if code := Run([]string{"init", "--exclude", "a", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("excluding a non-nested repository must fail")
+	}
+}
+
+// TestUsageDocumentsExclude keeps the escape hatch discoverable: a flag the
+// refusal recommends but the usage never mentions is a flag nobody finds.
+func TestUsageDocumentsExclude(t *testing.T) {
+	if !strings.Contains(usage, "--exclude") {
+		t.Fatalf("usage must document --exclude:\n%s", usage)
+	}
+}

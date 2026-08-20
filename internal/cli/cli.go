@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"wkt/internal/container"
@@ -23,7 +24,7 @@ import (
 
 const usage = `wkt — one task, one branch, many repositories
 
-  wkt init   [--workspace DIR] [--dry-run]
+  wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
@@ -54,6 +55,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	all := fs.Bool("all", false, "select every discovered repository")
 	force := fs.Bool("force", false, "remove even though work would be lost")
 	dryRun := fs.Bool("dry-run", false, "report without writing anything")
+	exclude := fs.String("exclude", "", "comma-separated nested repositories to exclude from adoption")
 
 	// The task name may fall anywhere among the flags: before all of them,
 	// after all of them, or split between two of them ("new --workspace WS
@@ -101,12 +103,53 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		if pairs := discover.NestedPairs(entries); len(pairs) > 0 {
-			e := wkterr.New("WKT_NESTED_REPO", "nested repositories are not supported")
-			for _, p := range pairs {
-				e = e.WithRemedy(p[0] + " is inside " + p[1])
+		// Exclusions are cumulative: what this run passes, plus whatever an
+		// earlier run recorded (spec §5.3 rule 6, "recorded in container
+		// state"). Without the recorded half, a workspace adopted once with
+		// --exclude would refuse on every later init.
+		prior, err := state.LoadContainer(c.ConfigDir())
+		if err != nil {
+			return fail(stderr, err)
+		}
+		excluded := map[string]bool{}
+		for _, p := range prior.Excluded {
+			excluded[p] = true
+		}
+		pairs := discover.NestedPairs(entries)
+		for _, p := range splitList(*exclude) {
+			nested := false
+			for _, pair := range pairs {
+				if pair[0] == p {
+					nested = true
+					break
+				}
 			}
-			return fail(stderr, e)
+			if !nested {
+				// A typo, or an attempt to drop an ordinary repository —
+				// which is not what this flag is for: an unexcluded
+				// top-level repository still has to be discovered, or its
+				// directory would be linked whole and share a repository
+				// writably with every task (spec §5.3 rule 4).
+				return fail(stderr, wkterr.New("WKT_NO_SUCH_NESTED_REPO", "not a nested repository in this workspace").
+					WithRepo(p).
+					WithRemedy("run wkt init to see which repositories are nested"))
+			}
+			excluded[p] = true
+		}
+		var stillNested [][2]string
+		for _, p := range pairs {
+			if !excluded[p[0]] {
+				stillNested = append(stillNested, p)
+			}
+		}
+		if len(stillNested) > 0 {
+			e := wkterr.New("WKT_NESTED_REPO", "nested repositories are not supported")
+			for _, p := range stillNested {
+				e = e.WithProblem(wkterr.Problem{Code: "WKT_NESTED_REPO", Repo: p[0], Detail: "inside " + p[1]})
+			}
+			return fail(stderr, e.WithRemedy(
+				"move the inner repository out of the outer one",
+				"or adopt the workspace without it: wkt init --exclude "+stillNested[0][0]))
 		}
 		repoCount := 0
 		for _, e := range entries {
@@ -124,6 +167,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if err := container.Create(c); err != nil {
+			return fail(stderr, err)
+		}
+		if err := recordExclusions(c, excluded); err != nil {
 			return fail(stderr, err)
 		}
 		return 0
@@ -371,4 +417,30 @@ func fail(stderr io.Writer, err error) int {
 		}
 	}
 	return 1
+}
+
+// splitList parses a comma-separated flag value, ignoring empty fields so a
+// trailing comma is not read as a repository named "".
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// recordExclusions persists init's --exclude decisions in a stable order, so
+// a later init honours them without the flag being repeated.
+func recordExclusions(c container.C, excluded map[string]bool) error {
+	if len(excluded) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(excluded))
+	for p := range excluded {
+		list = append(list, p)
+	}
+	sort.Strings(list)
+	return state.SaveContainer(c.ConfigDir(), state.Container{Excluded: list})
 }
