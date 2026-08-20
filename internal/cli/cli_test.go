@@ -480,3 +480,123 @@ func TestUsageStringDoesNotAdvertiseJSON(t *testing.T) {
 		t.Fatalf("--json exited %d, want 2 (an unrecognised flag is a usage error)", code)
 	}
 }
+
+// --- review round 3 ---
+
+// newSplitFlagsWorkspace seeds a two-repository workspace and runs `wkt
+// init` against it, returning the workspace path. Two repositories are
+// essential here, not one: with only one repository, --repos and --all
+// select the same tree, and a version that silently ignored --repos would
+// pass undetected.
+func newSplitFlagsWorkspace(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "svc-a"))
+	seedRepo(t, filepath.Join(ws, "svc-b"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	return ws
+}
+
+// assertOnlySvcA runs `wkt path` for the task and asserts the materialised
+// tree contains svc-a and does NOT contain svc-b — proving --repos svc-a
+// was actually honoured, not merely that the command exited 0. Exit 0 alone
+// is not enough: the round 3 regression exited 0 while silently
+// materialising both repositories instead of the one requested.
+func assertOnlySvcA(t *testing.T, ws, task string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	if code := Run([]string{"path", task, "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("path exited %d: %s", code, errb.String())
+	}
+	treePath := strings.TrimSpace(out.String())
+
+	// An unselected repository is still present in the tree — as a
+	// back-filled symlink to the workspace, per tree.PlanFor's design, so
+	// cross-repo references still resolve — so "svc-b must not exist" is
+	// the wrong assertion (and was, in an earlier draft of this test,
+	// incorrectly red against CORRECT code). The real distinction --repos
+	// makes is real materialised worktree (a directory, on the task
+	// branch) vs. back-fill symlink (unmodified, still on main).
+	aInfo, err := os.Lstat(filepath.Join(treePath, "svc-a"))
+	if err != nil {
+		t.Fatalf("--repos svc-a must materialise svc-a: %v", err)
+	}
+	if aInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("svc-a must be a real materialised worktree, not a back-fill symlink")
+	}
+	if branch, err := exec.Command("git", "-C", filepath.Join(treePath, "svc-a"), "rev-parse", "--abbrev-ref", "HEAD").Output(); err != nil || strings.TrimSpace(string(branch)) != task {
+		t.Fatalf("svc-a must be checked out on the task branch %q, got %q (err=%v)", task, strings.TrimSpace(string(branch)), err)
+	}
+
+	bInfo, err := os.Lstat(filepath.Join(treePath, "svc-b"))
+	if err != nil {
+		t.Fatalf("svc-b should still be present as a back-fill symlink: %v", err)
+	}
+	if bInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("--repos svc-a must NOT materialise svc-b as a real worktree; it must remain a back-fill symlink")
+	}
+}
+
+// TestNewHonoursReposFlagRegardlessOfPositionalPlacement is the round 3 fix:
+// --repos must take effect no matter which side of the task name it's typed
+// on, including split across both sides of it — the shape that regressed
+// ("new --workspace WS task --repos svc-a" silently selected every
+// repository instead of refusing or honouring --repos).
+func TestNewHonoursReposFlagRegardlessOfPositionalPlacement(t *testing.T) {
+	t.Run("positional-first", func(t *testing.T) {
+		ws := newSplitFlagsWorkspace(t)
+		var out, errb bytes.Buffer
+		if code := Run([]string{"new", "task", "--workspace", ws, "--repos", "svc-a"}, &out, &errb); code != 0 {
+			t.Fatalf("new exited %d: %s", code, errb.String())
+		}
+		assertOnlySvcA(t, ws, "task")
+	})
+
+	t.Run("flags-first", func(t *testing.T) {
+		ws := newSplitFlagsWorkspace(t)
+		var out, errb bytes.Buffer
+		if code := Run([]string{"new", "--workspace", ws, "--repos", "svc-a", "task"}, &out, &errb); code != 0 {
+			t.Fatalf("new exited %d: %s", code, errb.String())
+		}
+		assertOnlySvcA(t, ws, "task")
+	})
+
+	// This is the shape that regressed in round 2: flags on both sides of
+	// the positional. Before this fix it exited 0 and silently materialised
+	// every repository in the workspace (svc-a AND svc-b) instead of
+	// honouring --repos svc-a — the worst-direction failure (a safe refusal
+	// traded for a silent wrong result). Verified live against the round 2
+	// binary before writing this fix; see the task report for the
+	// transcript.
+	t.Run("split-across-the-positional", func(t *testing.T) {
+		ws := newSplitFlagsWorkspace(t)
+		var out, errb bytes.Buffer
+		if code := Run([]string{"new", "--workspace", ws, "task", "--repos", "svc-a"}, &out, &errb); code != 0 {
+			t.Fatalf("new exited %d: %s", code, errb.String())
+		}
+		assertOnlySvcA(t, ws, "task")
+	})
+}
+
+// TestNewRefusesTwoPositionalsExitsTwo is the belt-and-braces half of the
+// round 3 fix: a shape splitPositional cannot safely resolve to one
+// positional (here, two bare tokens) must be refused, not silently resolved
+// by picking the first and discarding the second.
+func TestNewRefusesTwoPositionalsExitsTwo(t *testing.T) {
+	ws := newSplitFlagsWorkspace(t)
+	var out, errb bytes.Buffer
+	code := Run([]string{"new", "task1", "task2", "--workspace", ws, "--all"}, &out, &errb)
+	if code != 2 {
+		t.Fatalf("two positionals exited %d, want 2: stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	// And nothing must have been created under either name.
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"path", "task1", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("a refused two-positional new must not have created task1")
+	}
+}

@@ -55,22 +55,31 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	force := fs.Bool("force", false, "remove even though work would be lost")
 	dryRun := fs.Bool("dry-run", false, "report without writing anything")
 
-	// The task name may be typed before its flags ("new feat-42 --all") or
-	// after them ("new --all feat-42"); Go's flag.Parse only ever consumes a
-	// run of flags up to the first non-flag token and then stops for good,
-	// so neither a single Parse call nor a single manual strip handles both
-	// orders on its own. Strip a leading positional first, if there is one
-	// (order one); otherwise parse normally and take whatever positional
-	// Parse left behind in Args() (order two).
-	var positional string
-	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-		positional, rest = rest[0], rest[1:]
-	}
+	// The task name may fall anywhere among the flags: before all of them,
+	// after all of them, or split between two of them ("new --workspace WS
+	// task --repos svc-a"). Go's flag.Parse only ever consumes a run of
+	// flags up to the first non-flag token and then stops for good, so a
+	// single Parse call cannot find a positional on the far side of a later
+	// flag — it would leave that later flag sitting unparsed in Args(),
+	// silently keeping its default instead of erroring. Concretely: "new
+	// --workspace WS task1 --repos svc-a" left --repos unparsed, so
+	// selection() fell back to its --all default and materialised every
+	// repository the user never asked for, while still reporting success.
+	// splitPositional extracts the one positional itself, by walking the
+	// flags, before fs.Parse ever runs, so every flag on both sides reaches
+	// it in one pass.
+	positional, rest := splitPositional(rest)
 	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
-	if positional == "" && fs.NArg() > 0 {
-		positional = fs.Arg(0)
+	// Belt and braces: splitPositional found at most one bare token and
+	// removed it, so fs.Parse should never have anything left in Args().
+	// If it does — two positionals, or a shape splitPositional could not
+	// safely place — refuse rather than silently pick one and discard the
+	// rest.
+	if fs.NArg() > 0 {
+		fmt.Fprint(stderr, usage)
+		return 2
 	}
 
 	c, err := container.Locate(*ws)
@@ -268,6 +277,55 @@ func requireContainer(c container.C) error {
 			WithRemedy("wkt init --workspace " + c.Workspace)
 	}
 	return nil
+}
+
+// valueFlags names wkt's flags that consume a separately-typed following
+// argument as their value, in both the single- and double-dash spelling Go's
+// flag package treats identically ("-workspace" and "--workspace" are the
+// same flag). Every other dash-prefixed token — a boolean flag, a
+// "--flag=value" token carrying its own value, or an unrecognised flag —
+// consumes only itself; splitPositional never needs to know which, since it
+// never inspects a flag's value as a positional candidate either way.
+var valueFlags = map[string]bool{
+	"-workspace": true, "--workspace": true,
+	"-repos": true, "--repos": true,
+}
+
+// splitPositional finds wkt's one positional argument (the task name)
+// wherever it falls among rest's flags — before them, after them, or split
+// between two of them — and returns it separately from every flag token, in
+// their original relative order, so a single fs.Parse afterwards sees every
+// flag regardless of which side of the positional it was typed on.
+//
+// It must never guess wrong in the unsafe direction. If a value flag's
+// separately-typed value cannot be told apart from a positional by looking
+// at it alone (nothing here inspects a value's shape — that is deliberate:
+// a workspace path or a repo list can itself start with anything), the
+// value is skipped over structurally, by the flag preceding it, and is
+// therefore never considered as a positional candidate. If no bare token is
+// ever found, it returns rest untouched rather than fabricating one, so an
+// unparsable shape falls through to fs.Parse's own error handling, or to the
+// caller's fs.NArg()>0 check, instead of a wrong guess being silently acted
+// on. See the round 3 regression this replaces: a single fs.Parse call left
+// a flag typed after the task name sitting unparsed in Args(), silently
+// keeping its zero value instead of erroring.
+func splitPositional(rest []string) (positional string, remaining []string) {
+	for i := 0; i < len(rest); i++ {
+		tok := rest[i]
+		if !strings.HasPrefix(tok, "-") {
+			out := make([]string, 0, len(rest)-1)
+			out = append(out, rest[:i]...)
+			out = append(out, rest[i+1:]...)
+			return tok, out
+		}
+		if strings.Contains(tok, "=") {
+			continue // "--flag=value" is one token; nothing extra to skip
+		}
+		if valueFlags[tok] {
+			i++ // skip the value flag's separately-typed value
+		}
+	}
+	return "", rest
 }
 
 func selection(entries []discover.Entry, repos string, all bool) []string {
