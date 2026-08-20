@@ -3,7 +3,6 @@ package container
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,11 +39,18 @@ func Locate(workspace string) (C, error) {
 	}
 	sum := sha256.Sum256([]byte(ws))
 	id := hex.EncodeToString(sum[:])[:12]
-	return C{Root: filepath.Join(home, ".local", "state", "wkt", id), Workspace: ws}, nil
+	root := filepath.Join(home, ".local", "state", "wkt", id)
+	if paths.IsUnder(root, ws) {
+		return C{}, wkterr.New("WKT_NO_CONTAINER", "the fallback container would live inside the workspace").
+			WithPath(root).
+			WithFound("workspace: " + ws).
+			WithRemedy("configure the container location explicitly")
+	}
+	return C{Root: root, Workspace: ws}, nil
 }
 
 func writable(dir string) bool {
-	probe := filepath.Join(dir, ".wkt-write-probe")
+	probe := filepath.Join(dir, ".wkt-write-probe-"+strconv.Itoa(os.Getpid()))
 	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return false
@@ -68,7 +74,7 @@ func Lock(c C) (func(), error) {
 	path := filepath.Join(c.Root, ".wkt.lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, wkterr.New("WKT_LOCKED", "cannot open the container lock").
+		return nil, wkterr.New("WKT_CONTAINER_UNUSABLE", "cannot open the container lock").
 			WithPath(path).WithFound(err.Error())
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
@@ -83,8 +89,5 @@ func Lock(c C) (func(), error) {
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-		_ = os.Remove(path)
 	}, nil
 }
-
-var _ = fmt.Sprintf
