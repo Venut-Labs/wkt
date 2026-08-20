@@ -76,6 +76,13 @@ func TestEnsureConfiguresFetchRefspecAndWorkspaceRemote(t *testing.T) {
 	base := t.TempDir()
 	ws := filepath.Join(base, "ws", "svc-a")
 	sha := seedRepo(t, ws)
+	// Give the workspace a real origin: with no origin, Ensure legitimately
+	// drops the "origin" remote entirely (untidy otherwise), so the refspec
+	// assertion below needs an origin present to mean anything.
+	origin := filepath.Join(base, "origin.git")
+	g(t, base, "init", "--bare", "-q", origin)
+	g(t, ws, "remote", "add", "origin", origin)
+	g(t, ws, "push", "-q", "origin", "main")
 	storeDir := filepath.Join(base, "c", "store")
 	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -106,6 +113,59 @@ func TestEnsureConfiguresFetchRefspecAndWorkspaceRemote(t *testing.T) {
 	}
 	if !HasObject(sp, local) {
 		t.Fatal("after FetchWorkspace the local-only commit must be reachable (spec §5.2)")
+	}
+}
+
+func TestEnsureRepointsOriginAndFetchesFromRealUpstream(t *testing.T) {
+	base := t.TempDir()
+	upstream := filepath.Join(base, "upstream.git")
+	g(t, base, "init", "--bare", "-q", upstream)
+
+	ws := filepath.Join(base, "ws", "svc-a")
+	sha := seedRepo(t, ws)
+	g(t, ws, "remote", "add", "origin", upstream)
+	wantURL := strings.TrimSpace(g(t, ws, "config", "--get", "remote.origin.url"))
+	g(t, ws, "push", "-q", "origin", "main")
+
+	storeDir := filepath.Join(base, "store")
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sp, err := Ensure(storeDir, ws, "svc-a", "t-origin", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The store must point origin at the repository's real upstream, not at
+	// the workspace it was cloned from (the whole reason Ensure touches
+	// remotes at all).
+	gotURL := strings.TrimSpace(g(t, sp, "config", "--get", "remote.origin.url"))
+	if gotURL != wantURL {
+		t.Fatalf("store remote.origin.url = %q, want %q (the real upstream)", gotURL, wantURL)
+	}
+
+	// Push a commit to the upstream from a THIRD clone -- never through the
+	// workspace repo -- to prove the URL and the refspec work together.
+	elsewhere := filepath.Join(base, "elsewhere")
+	g(t, base, "clone", "-q", upstream, elsewhere)
+	if err := os.WriteFile(filepath.Join(elsewhere, "src", "a.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, elsewhere, "-c", "user.email=e@x", "-c", "user.name=t", "add", "-A")
+	g(t, elsewhere, "commit", "-qm", "pushed upstream")
+	g(t, elsewhere, "push", "-q", "origin", "main")
+	upstreamOnly := strings.TrimSpace(g(t, elsewhere, "rev-parse", "HEAD"))
+
+	if HasObject(sp, upstreamOnly) {
+		t.Fatal("precondition: the store should not have the upstream-only commit yet")
+	}
+	g(t, sp, "fetch", "-q", "origin")
+	if !HasObject(sp, upstreamOnly) {
+		t.Fatal("after fetching origin the upstream-only commit must be reachable")
+	}
+	if out := g(t, sp, "rev-parse", "--verify", "refs/remotes/origin/main"); len(strings.TrimSpace(out)) < 40 {
+		t.Fatalf("origin fetch must land in refs/remotes/origin/*: %q", out)
 	}
 }
 

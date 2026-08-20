@@ -36,7 +36,7 @@ func Ensure(storeDir, repoAbs, relPath, taskName, baseSHA string) (string, error
 	pin := "refs/wkt/base/" + taskName
 	if _, err := gitx.Run(repoAbs, "update-ref", pin, baseSHA); err != nil {
 		return "", wkterr.New("WKT_PIN_FAILED", "cannot pin the base commit in the workspace repository").
-			WithRepo(relPath).WithPath(repoAbs)
+			WithRepo(relPath).WithPath(repoAbs).WithFound(err.Error())
 	}
 
 	sp := filepath.Join(storeDir, ID(relPath, repoAbs)+".git")
@@ -46,41 +46,43 @@ func Ensure(storeDir, repoAbs, relPath, taskName, baseSHA string) (string, error
 
 	if _, err := gitx.Run(storeDir, "clone", "--shared", "--bare", "-q", repoAbs, sp); err != nil {
 		return "", wkterr.New("WKT_STORE_CREATE", "cannot mirror the repository").
-			WithRepo(relPath).WithPath(sp)
+			WithRepo(relPath).WithPath(sp).WithFound(err.Error())
 	}
 	// De-borrow: copy the objects in, then drop the alternates pointer, so the
 	// store survives deletion or re-clone of the workspace repository (spec §5.2).
 	if _, err := gitx.Run(sp, "repack", "-a", "-d", "-q"); err != nil {
-		return "", wkterr.New("WKT_STORE_CREATE", "cannot repack the store").WithRepo(relPath).WithPath(sp)
+		return "", wkterr.New("WKT_STORE_CREATE", "cannot repack the store").WithRepo(relPath).WithPath(sp).WithFound(err.Error())
 	}
 	if err := os.Remove(filepath.Join(sp, "objects", "info", "alternates")); err != nil && !os.IsNotExist(err) {
-		return "", wkterr.New("WKT_STORE_CREATE", "cannot de-borrow the store").WithRepo(relPath).WithPath(sp)
+		return "", wkterr.New("WKT_STORE_CREATE", "cannot de-borrow the store").WithRepo(relPath).WithPath(sp).WithFound(err.Error())
 	}
 
 	origin, err := gitx.Run(repoAbs, "remote", "get-url", "origin")
 	if err == nil && origin != "" {
 		if _, err := gitx.Run(sp, "remote", "set-url", "origin", origin); err != nil {
-			return "", wkterr.New("WKT_STORE_CREATE", "cannot point the store at the real origin").WithRepo(relPath)
+			return "", wkterr.New("WKT_STORE_CREATE", "cannot point the store at the real origin").WithRepo(relPath).WithFound(err.Error())
+		}
+		// Bare clones set NO fetch refspec; without this refs/remotes/* never exist,
+		// which silently breaks sync and the unpushed-commit guard (spec H15).
+		if _, err := gitx.Run(sp, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+			return "", wkterr.New("WKT_STORE_CREATE", "cannot configure the origin refspec").WithRepo(relPath).WithFound(err.Error())
 		}
 	} else {
+		// No origin on the workspace repository: drop the borrowed "origin" the
+		// clone created rather than leave a URL-less remote with a refspec.
 		_, _ = gitx.Run(sp, "remote", "remove", "origin")
-	}
-	// Bare clones set NO fetch refspec; without this refs/remotes/* never exist,
-	// which silently breaks sync and the unpushed-commit guard (spec H15).
-	if _, err := gitx.Run(sp, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return "", wkterr.New("WKT_STORE_CREATE", "cannot configure the origin refspec").WithRepo(relPath)
 	}
 	// Second remote: the workspace repository, so a task can branch from work the
 	// developer has committed locally and not pushed (spec §5.2).
 	if _, err := gitx.Run(sp, "remote", "add", "workspace", repoAbs); err != nil {
-		return "", wkterr.New("WKT_STORE_CREATE", "cannot add the workspace remote").WithRepo(relPath)
+		return "", wkterr.New("WKT_STORE_CREATE", "cannot add the workspace remote").WithRepo(relPath).WithFound(err.Error())
 	}
 	if _, err := gitx.Run(sp, "config", "remote.workspace.fetch", "+refs/heads/*:refs/remotes/ws/*"); err != nil {
-		return "", wkterr.New("WKT_STORE_CREATE", "cannot configure the workspace refspec").WithRepo(relPath)
+		return "", wkterr.New("WKT_STORE_CREATE", "cannot configure the workspace refspec").WithRepo(relPath).WithFound(err.Error())
 	}
 	for _, kv := range [][2]string{{"gc.auto", "0"}, {"core.hooksPath", "/dev/null"}} {
 		if _, err := gitx.Run(sp, "config", kv[0], kv[1]); err != nil {
-			return "", wkterr.New("WKT_STORE_CREATE", "cannot harden the store").WithRepo(relPath)
+			return "", wkterr.New("WKT_STORE_CREATE", "cannot harden the store").WithRepo(relPath).WithFound(err.Error())
 		}
 	}
 	return sp, nil
@@ -88,7 +90,7 @@ func Ensure(storeDir, repoAbs, relPath, taskName, baseSHA string) (string, error
 
 func FetchWorkspace(storePath string) error {
 	if _, err := gitx.Run(storePath, "fetch", "-q", "workspace"); err != nil {
-		return wkterr.New("WKT_FETCH_FAILED", "cannot fetch from the workspace repository").WithPath(storePath)
+		return wkterr.New("WKT_FETCH_FAILED", "cannot fetch from the workspace repository").WithPath(storePath).WithFound(err.Error())
 	}
 	return nil
 }
