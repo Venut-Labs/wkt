@@ -2751,7 +2751,8 @@ git commit -m "feat: mirrored tree materialisation with back-filled repositories
 - Consumes: `container`, `discover`, `gitx`, `state`, `store`, `tree`, `wkterr`.
 - Produces:
   - `task.Resolution{Repo state.Repo; Problems []*wkterr.E}`.
-  - `task.Validate(c container.C, entries []discover.Entry, name string, selected []string) ([]state.Repo, error)` — phase one: resolves the base per repository and checks branch existence, ancestry, `worktree list` occupancy, D/F conflicts, case-fold collisions and `check-ref-format` across the **whole set** before anything is created.
+  - `task.SubmoduleWarnings(entries []discover.Entry, selected []string) []Blocker` — names every selected repository carrying a submodule, so `new` can warn (spec §5.7).
+  - `task.Validate(c container.C, entries []discover.Entry, name string, selected []string) ([]state.Repo, error)` — phase one: refuses a task name that is not one path segment, then resolves the base per repository and checks branch existence, ancestry, `worktree list` occupancy, D/F conflicts, case-fold collisions and `check-ref-format` across the **whole set** before anything is created.
   - `task.Create(c container.C, entries []discover.Entry, name string, selected []string) (state.Task, error)` — phase two, rolling back every worktree, branch, pin and directory it created on any failure.
 
 **Traps:**
@@ -2771,6 +2772,14 @@ git commit -m "feat: mirrored tree materialisation with back-filled repositories
 - A rollback test must actually **reach** phase two. If validation rejects the
   batch first, the undo stack is never exercised and the test passes green
   against a rollback that does nothing.
+- The task name is a branch name **and** a path segment. `check-ref-format`
+  accepts `feature/x` because it is a fine branch name; as a path it makes the
+  state write fail *after* the tree is built, and the rollback leaves an empty
+  `trees/feature` that blocks the plain name `feature` forever. Refuse the
+  separator in phase one, before anything exists.
+- `WKT_TREE_EXISTS` is only reachable when **no** task state exists, so a remedy
+  of "wkt rm <name>" sends the user to a command that answers `WKT_NO_TASK`.
+  Name the directory instead.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3106,6 +3115,69 @@ func TestCreateRefusesAndDoesNotTouchAPreExistingTreeDirectory(t *testing.T) {
 		t.Fatalf("refusing up front must mean nothing was ever created for either repository, found pin %q", out)
 	}
 }
+
+// TestValidateRejectsATaskNameThatIsNotOneSafePathSegment covers adversarial
+// finding F1. "feature/x" is a perfectly valid *branch* name, so
+// check-ref-format waves it through — but the task name is also a path
+// segment (trees/<name>, state/tasks/<name>.json), and a name carrying a
+// separator made Create build the tree, fail at the state write, roll back,
+// and leave an empty trees/feature behind that then blocked the plain name
+// "feature" forever.
+func TestValidateRejectsATaskNameThatIsNotOneSafePathSegment(t *testing.T) {
+	c, entries := fixture(t)
+	for _, name := range []string{"feature/x", "a/b/c", "sub/dir/task", "with\\backslash"} {
+		_, err := Validate(c, entries, name, []string{"docs"})
+		if err == nil {
+			t.Fatalf("%q must be refused: the task name is a path segment", name)
+		}
+		var e *wkterr.E
+		if !errors.As(err, &e) || e.Code != "WKT_BAD_TASK_NAME" {
+			t.Fatalf("%q: got %v, want WKT_BAD_TASK_NAME", name, err)
+		}
+	}
+}
+
+// TestValidateStillAcceptsOrdinaryTaskNames pins the other side of F1's fix:
+// the guard must reject separators, not tighten the name rules generally.
+func TestValidateStillAcceptsOrdinaryTaskNames(t *testing.T) {
+	c, entries := fixture(t)
+	for _, name := range []string{"feat-42", "feat_42", "FEAT.42", "задача"} {
+		if _, err := Validate(c, entries, name, []string{"docs"}); err != nil {
+			t.Fatalf("%q must be accepted, got %v", name, err)
+		}
+	}
+}
+
+// TestSubmoduleWarningsNamesEverySelectedRepositoryWithASubmodule covers
+// adversarial finding F3. Spec §5.7 requires wkt new to warn while the
+// submodule route is unimplemented, because rm refuses on a submodule even
+// with --force: creating such a task silently produces one that cannot be
+// removed by any wkt command at all.
+func TestSubmoduleWarningsNamesEverySelectedRepositoryWithASubmodule(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seed(t, filepath.Join(ws, "plain"))
+	seed(t, filepath.Join(base, "lib"))
+	seed(t, filepath.Join(ws, "super"))
+	g(t, filepath.Join(ws, "super"), "-c", "protocol.file.allow=always",
+		"submodule", "add", "-q", filepath.Join(base, "lib"), "vendor")
+	g(t, filepath.Join(ws, "super"), "commit", "-qm", "add submodule")
+
+	entries, err := discover.Walk(ws, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := SubmoduleWarnings(entries, []string{"plain", "super"})
+	if len(warned) != 1 || warned[0].Repo != "super" {
+		t.Fatalf("want exactly one warning naming super, got %+v", warned)
+	}
+	if warned[0].Code != "WKT_SUBMODULE" {
+		t.Fatalf("warning must carry WKT_SUBMODULE, got %q", warned[0].Code)
+	}
+	if SubmoduleWarnings(entries, []string{"plain"}) != nil {
+		t.Fatal("a selection without submodules must warn about nothing")
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -3170,6 +3242,18 @@ func resolveBase(repoAbs string) (sha, ref string, err error) {
 // ancestry, case-fold collisions and D/F ref conflicts for every selected
 // repository before phase two touches anything.
 func Validate(c container.C, entries []discover.Entry, name string, selected []string) ([]state.Repo, error) {
+	// The task name is a branch name *and* a path segment: trees/<name>,
+	// state/tasks/<name>.json, staging/<name>. check-ref-format accepts
+	// "feature/x" because it is a perfectly good branch name, but as a path
+	// it makes the state write fail on a directory that does not exist —
+	// after the tree was already built — and the rollback then leaves an
+	// empty trees/feature behind that blocks the plain name "feature"
+	// forever. Refuse the separator here, before anything is created.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return nil, wkterr.New("WKT_BAD_TASK_NAME", "the task name is also a directory name, so it cannot contain a path separator").
+			WithFound(name).
+			WithRemedy("use a single-segment name such as " + flatten(name))
+	}
 	if !gitx.RunOK(".", "check-ref-format", "--branch", name) {
 		return nil, wkterr.New("WKT_BAD_TASK_NAME", "not a valid branch name").WithFound(name)
 	}
@@ -3264,8 +3348,14 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 	// directory, and it also stops a stale leftover tree from being
 	// silently adopted.
 	if _, err := os.Stat(treeRoot); err == nil {
-		return state.Task{}, wkterr.New("WKT_TREE_EXISTS", "the task tree directory already exists").
-			WithPath(treeRoot).WithRemedy("wkt status "+name, "wkt rm "+name)
+		// Not "wkt rm <name>": this branch is only reachable when no task
+		// state exists (a task with state fails above as WKT_TASK_EXISTS),
+		// and rm on a stateless directory answers WKT_NO_TASK — a dead end
+		// that left the user with no documented way out.
+		return state.Task{}, wkterr.New("WKT_TREE_EXISTS", "the task tree directory already exists, but no task owns it").
+			WithPath(treeRoot).
+			WithRemedy("inspect the directory: it is left over from an interrupted create",
+				"remove it once you are sure it holds nothing you need, then retry")
 	} else if !os.IsNotExist(err) {
 		return state.Task{}, wkterr.New("WKT_CHECK_FAILED", "cannot check the task tree directory").WithPath(treeRoot)
 	}
@@ -3416,12 +3506,61 @@ func worktreeName(worktreePath string) (string, error) {
 	}
 	return name, nil
 }
+
+// flatten suggests a single-segment spelling of a name that carried
+// separators, so the refusal above names a usable alternative.
+func flatten(name string) string {
+	f := strings.NewReplacer("/", "-", "\\", "-").Replace(strings.Trim(name, `/\`))
+	if f == "" || f == "." || f == ".." {
+		return "task"
+	}
+	return f
+}
+
+// SubmoduleWarnings names every selected repository that carries a submodule.
+// Spec §5.7 requires the warning because rm refuses on a submodule even with
+// --force — its object store lives under the doomed worktree — so a task
+// created over one cannot be removed by any wkt command until the submodule
+// is deinitialised. Warning at create time is the difference between knowing
+// that before the work starts and discovering it at teardown.
+func SubmoduleWarnings(entries []discover.Entry, selected []string) []Blocker {
+	byRel := map[string]discover.Entry{}
+	for _, e := range entries {
+		byRel[e.RelPath] = e
+	}
+	var out []Blocker
+	for _, rel := range selected {
+		e, ok := byRel[rel]
+		if !ok || e.Kind != discover.KindRepo {
+			continue
+		}
+		sm, err := gitx.Run(e.AbsPath, "submodule", "status", "--recursive")
+		if err != nil || strings.TrimSpace(sm) == "" {
+			continue
+		}
+		out = append(out, Blocker{
+			Code: "WKT_SUBMODULE", Repo: rel, Path: e.AbsPath,
+			Detail: submodulePath(sm), Severity: "info",
+		})
+	}
+	return out
+}
+
+// submodulePath pulls the submodule's path out of a "git submodule status"
+// line ("<status><sha> <path> (<describe>)") instead of surfacing the raw
+// line, which leads with a bare SHA and reads as noise.
+func submodulePath(status string) string {
+	if f := strings.Fields(firstLine(status)); len(f) >= 2 {
+		return f[1]
+	}
+	return strings.TrimSpace(firstLine(status))
+}
 ```
 
 - [ ] **Step 5: Run the tests**
 
 Run: `go test ./internal/task/ -v`
-Expected: all seven tests PASS. The rollback ones are the guard for spec H10 — create is not atomic unless the rollback works.
+Expected: all ten tests PASS. The rollback ones are the guard for spec H10 — create is not atomic unless the rollback works.
 
 - [ ] **Step 6: Commit**
 
@@ -4962,7 +5101,7 @@ func finishRemove(c container.C, t state.Task, name, staged string) error {
 - [ ] **Step 5: Run the tests**
 
 Run: `go test ./internal/task/ -v`
-Expected: all thirty tests in the package PASS — the seven from task 8 and the twenty-three here.
+Expected: all thirty-three tests in the package PASS — the ten from task 8 and the twenty-three here.
 
 - [ ] **Step 6: Commit**
 
@@ -4985,6 +5124,7 @@ git commit -m "feat: refuse-only teardown with staging fence"
 - Produces:
   - `cli.Run(args []string, stdout, stderr io.Writer) int` — the exit code contract: 0 consistent, 2 usage or task exists, 3 drift, 4 container missing, 1 any other typed failure.
   - Documented aliases `create` → `new` and `cleanup` → `rm`, because the acceptance battery drives those verbs (spec §7.1).
+  - `new` warns on stderr, before creating anything, when a selected repository carries a submodule (spec §5.7) — `rm` refuses on one even with `--force`, so the task would otherwise be unremovable by any wkt command.
 
 **Traps:**
 
@@ -4997,6 +5137,8 @@ git commit -m "feat: refuse-only teardown with staging fence"
   when a flag comes first. Split the argument vector structurally, deriving the
   set of value-taking flags **from the `FlagSet` itself** rather than from a
   hand-maintained list that drifts.
+- The submodule warning belongs on `new`, not only in `rm`'s refusal: learning
+  at teardown that the task cannot be torn down is learning too late.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -5639,6 +5781,103 @@ func TestSplitPositionalDerivesValueFlagsFromTheFlagSet(t *testing.T) {
 		t.Fatalf("got positional %q, want %q — a boolean flag must not swallow the following token", positional2, "task2")
 	}
 }
+
+// TestNewWithASeparatorInTheTaskNameCreatesNothing covers adversarial
+// finding F1 end to end: the refusal must happen before anything is built,
+// so no debris is left in trees/ to block a later, legitimate task name.
+func TestNewWithASeparatorInTheTaskNameCreatesNothing(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "feature/x", "--all", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatalf("new must refuse a task name carrying a path separator; stderr=%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_BAD_TASK_NAME") {
+		t.Fatalf("want WKT_BAD_TASK_NAME, got %s", errb.String())
+	}
+	trees := filepath.Join(ws+".worktrees", "trees")
+	ents, err := os.ReadDir(trees)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("the refusal must leave trees/ empty, found %d entries", len(ents))
+	}
+	// The name whose slot the debris used to occupy must still be usable.
+	out.Reset()
+	if code := Run([]string{"new", "feature", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the plain name must remain available, exited %d: %s", code, errb.String())
+	}
+}
+
+// TestTreeExistsRemedyIsActionable covers the second half of F1: the old
+// remedy suggested "wkt rm <task>", which answers WKT_NO_TASK when only the
+// directory exists — a dead end that left the user with no documented way out.
+func TestTreeExistsRemedyIsActionable(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	orphan := filepath.Join(ws+".worktrees", "trees", "orphan")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := Run([]string{"new", "orphan", "--all", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("new must refuse when the tree directory is already there")
+	}
+	msg := errb.String()
+	if !strings.Contains(msg, "WKT_TREE_EXISTS") {
+		t.Fatalf("want WKT_TREE_EXISTS, got %s", msg)
+	}
+	if strings.Contains(msg, "wkt rm orphan") {
+		t.Fatalf("the remedy must not recommend a command that answers WKT_NO_TASK: %s", msg)
+	}
+	if !strings.Contains(msg, orphan) {
+		t.Fatalf("the remedy must name the directory to deal with: %s", msg)
+	}
+}
+
+// TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule covers F3 at the
+// CLI seam: the warning goes to stderr and the command still succeeds.
+func TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(base, "lib"))
+	seedRepo(t, filepath.Join(ws, "super"))
+	sub := filepath.Join(ws, "super")
+	for _, args := range [][]string{
+		{"-c", "protocol.file.allow=always", "submodule", "add", "-q", filepath.Join(base, "lib"), "vendor"},
+		{"commit", "-qm", "add submodule"},
+	} {
+		cmd := exec.Command("git", append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)...)
+		cmd.Dir = sub
+		if o, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, o)
+		}
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new must still succeed, exited %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_SUBMODULE") || !strings.Contains(errb.String(), "super") {
+		t.Fatalf("new must warn on stderr that super carries a submodule, got %q", errb.String())
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -5802,6 +6041,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 		selected := selection(entries, *repos, *all)
+		// Spec §5.7: warn before the work starts, because rm refuses on a
+		// submodule even with --force, so a task created over one cannot be
+		// removed by any wkt command until the submodule is deinitialised.
+		for _, w := range task.SubmoduleWarnings(entries, selected) {
+			fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
+				w.Code, w.Repo, w.Detail)
+		}
 		t, err := task.Create(c, entries, positional, selected)
 		if err != nil {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2

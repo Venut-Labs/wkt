@@ -67,3 +67,55 @@ global constraints now forbid the shape outright.
   repository below the discovery bound was consequently shared writable by every
   task until the final review caught it. The spec was already right; the plan now
   carries the rule in its global constraints and in task 7.
+
+---
+
+# Findings from the adversarial pass after the merge
+
+The port above closed the defects that *executing* the plan surfaced. This
+second pass attacked the merged product instead: 15 mutations against the test
+suite, and live experiments against real `git`, a real second filesystem and
+real submodules.
+
+## What held
+
+Every one of the 15 valid mutations was caught by a test — staging fence,
+back-fill, the regenerable allowlist, three fail-closed checks, the exit-code
+map, both undo orderings, the execute bit, the depth bound, `SkipDir` on a
+symlink, the structural `gitdir` discriminator, `SchemaVersion` validation, the
+fallback-container refusal, the lock-file unlink, the `FlagSet`-derived flag
+split, and the symlink-target repository scan. Two mutations appeared to survive
+until the patches themselves turned out to be incomplete, not the tests blind.
+
+Verified against reality rather than argued:
+
+- A submodule's admin directory has **no** `gitdir` file; a linked worktree's
+  does (git 2.50). The structural discriminator is sound.
+- H3 holds: writing through a back-fill link and then `rm --force` leaves the
+  workspace untouched — the deletion never follows a symlink.
+- The cross-device refusal was driven with an actual second APFS volume: it
+  refuses, the tree survives, `staging/` stays empty, the task stays usable.
+  This is what §5.7 now promises, and it is now a reproduced fact.
+- Path traversal (`../escape`, `a/../../escape`) is refused; two concurrent
+  `wkt new` runs cannot interleave; the base pin is written and removed without
+  residue; `--dry-run` writes nothing; spaces and non-ASCII in repository names
+  work.
+
+## Defects found (fixed)
+
+| # | Defect | Fix |
+|---|---|---|
+| F1 | `feature/x` — a valid *branch* name — passed validation, the tree was built, the state write failed on a missing directory, the rollback left an empty `trees/feature`, and that debris blocked the plain name `feature` forever. `WKT_TREE_EXISTS` recommended `wkt rm feature`, which answers `WKT_NO_TASK`: a dead end. | Refuse a task name that is not one path segment, in phase one; make the leftover-directory remedy name the directory. |
+| F3 | Spec §5.7 requires `wkt new` to warn when a selected repository carries a submodule, because `rm` refuses on one **even with `--force`**. The warning was never implemented, so such a task was created silently and could then not be removed by any wkt command. | `task.SubmoduleWarnings`, printed by `new` on stderr before anything is created. |
+
+## Defects found (open)
+
+| # | Defect | Why it matters |
+|---|---|---|
+| F2 | Spec §1 promises "the rest of the workspace reachable **read-only**". In v0 a back-fill link is fully writable — verified by writing through one. The mechanism that made it read-only is the perimeter, which was descoped from v0. | The spec states a guarantee the shipped product does not provide. Either reword §1 until the perimeter lands, or land it. |
+| F4 | `wkt init --exclude <path>` is promised twice (§5.3 rule 6 and the §7.1 command table) and exists nowhere — not in the plan, not in the code. | A workspace containing a genuine nested repository cannot be adopted at all: `init` refuses and the documented escape hatch does not exist. |
+| F5 | Blockers are rendered into the error's `remedy` field as `Code Repo Path Detail`, so "what to do" holds a list of problems, `Path` is empty, and `Detail` carries raw `git submodule status` output — against the global rule never to surface raw git output. | The refusal message is the product's main interaction at teardown, and it currently reads as noise. |
+| F6 | Every verb shares one `FlagSet`: `wkt init --force --repos zzz` and `wkt path t --force --all` are accepted silently. | Same class as defect 24 above — input that means nothing is taken as success. |
+| F7 | `container.Lock` is `LOCK_NB` with no wait or retry, so two agents running `wkt new` at the same time make one of them fail with `WKT_LOCKED`. | The spec's own premise is two agents working at once. Correct, but abrasive. |
+| F8 | The plan's interface list promises a "stale-PID sweep" on `container.Lock`; there is none, and none is needed (flock is released by the kernel). | Plan prose describing behaviour the code does not have is how the last round's defects started. |
+| F9 | The plan's "Consumes" lines disagree with the real import graph: task 2 claims `wkterr` (imports nothing), task 3 claims `gitx` and `wkterr` (imports only `paths`), task 7 omits `paths` (imports it). | Same class as F8. |
