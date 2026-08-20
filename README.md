@@ -1,2 +1,88 @@
 # wkt
-Git worktrees across every repo
+
+One task, one branch, many repositories.
+
+A change rarely fits in one repository. `wkt` gives each task its own tree
+where every participating repository is a real git worktree on the task
+branch, **laid out in the same shape as the workspace**, so relative paths
+between repositories keep resolving. Repositories left out of the task are
+symlinked at their mirrored positions, so a partial selection still gives a
+complete tree.
+
+The workspace itself is never written to: task worktrees are cut from
+per-repository bare stores kept in a container beside the workspace.
+
+```
+~/work/                        the workspace, a plain directory
+  services/svc-a/              a repository
+  services/svc-b/              another
+  shared/                      another
+  CONVENTIONS.md               a loose file
+
+~/work.worktrees/trees/feat-42/
+  services/svc-a/              worktree from the store, branch feat-42
+  services/svc-b -> ~/work/services/svc-b     not in this task
+  shared         -> ~/work/shared             not in this task
+  CONVENTIONS.md               copy, hash-recorded
+```
+
+## Status
+
+v0: `init`, `new`, `path`, `status`, `rm`. Removal is **refuse-only** — it
+enumerates the filesystem rather than trusting its own state file, and
+refuses while anything in the tree would lose work.
+
+macOS and Linux. Windows is out of scope (symlinks plus deletion semantics).
+
+## Build
+
+Go 1.26, standard library only, no third-party dependencies.
+
+```sh
+go build -o wkt ./cmd/wkt
+go test ./...                                  # unit tests
+WT_CMD=$PWD/wkt bash test/run.sh               # acceptance battery
+```
+
+Requires `git` 2.29 or newer (`git worktree repair`).
+
+## Use
+
+```sh
+wkt init --workspace ~/work            # adopt: discover repositories, build the container
+cd ~/work                              # every verb defaults to --workspace .
+wkt new feat-42 --all                  # a task over every repository
+wkt new feat-42 --repos services/svc-a,shared
+cd "$(wkt path feat-42)"               # work here
+wkt status                             # what exists, and what has drifted
+wkt rm feat-42                         # refuses while anything would be lost
+wkt rm feat-42 --force                 # override, behind a staging fence
+```
+
+`init` refuses a genuine nested repository; `--exclude services/svc-a/vendored`
+adopts the workspace without it and records the decision.
+
+Exit codes: `0` consistent, `2` usage error or task already exists, `3` drift
+detected, `4` no container (run `init`), `1` any other typed failure. Errors
+are one line of JSON on stderr; a refusal that has several causes lists them
+under `problems` (what is in the way), with `remedy` reserved for what to do.
+
+## What it does not promise
+
+- **Not a security boundary**, and **no read-only workspace in v0**: an agent
+  inside a task tree can write into the workspace through a back-fill link.
+  `wkt` never writes there itself, and teardown never follows a link.
+- **No conflict prevention.** Two tasks editing one file still conflict; the
+  conflict moves to the eventual rebase.
+- **No cross-repo atomic merge**, and **not a remote-side boundary** — a task
+  tree can push to the real origin.
+- **No runtime environment**: ports, compose projects, databases and
+  dependency installation are out of scope.
+- **A task over a repository with submodules cannot be removed** until the
+  submodule is deinitialised — `new` warns when it sees one.
+
+## Design
+
+`docs/superpowers/specs/2026-08-19-wkt-design.md` is the spec: what is built,
+what was measured, and what was deliberately left out. The plan that built v0,
+and the defects executing it surfaced, are beside it under `docs/superpowers/plans/`.

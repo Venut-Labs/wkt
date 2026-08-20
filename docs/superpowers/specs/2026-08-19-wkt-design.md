@@ -61,13 +61,22 @@ coherent base, one merge request per repository.
 
 `wkt` gives each task its own tree where every participating repository is a real
 worktree on the task branch, laid out **in the same shape as the workspace**,
-with the rest of the workspace reachable read-only.
+with the rest of the workspace reachable in place through link slots.
+
+Those slots are only *read-only* once the generated perimeter is in force
+(§5.6). The perimeter is not in v0, so in v0 a back-fill link is a writable
+path into the workspace — verified by writing through one. Until it lands,
+"reachable" is the honest word.
 
 ### 1.1 What it does not promise
 
 State these in the README or users will assume them:
 
 - **Not a security boundary.** See §0 and §5.6.
+- **No read-only workspace in v0.** The perimeter that denies writes through a
+  link slot is v0.1; until then an agent inside a task tree can write into the
+  workspace through a back-fill link. `wkt` itself never writes there, and
+  teardown never follows a link (H3), but the path is open.
 - **No conflict prevention.** Two tasks editing one file still conflict; the
   conflict moves from `git status` to the eventual rebase.
 - **No cross-repo atomic merge.** GitHub has no primitive, Gerrit topics are
