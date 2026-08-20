@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -115,7 +116,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		if s, err := gitx.Run(wt, "status", "--porcelain"); err != nil {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt})
 		} else if s != "" {
-			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: firstLine(s)})
+			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: describePorcelain(s)})
 		}
 		// 3: ignored content. git's own refusal never fires on any of it (H1).
 		// A bulk-ignored directory collapses to one "!! dir/" line — its
@@ -169,7 +170,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		}
 		if n, err := gitx.Run(wt, args...); err == nil {
 			if n != "" && n != "0" {
-				out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: n + " commit(s)"})
+				out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: plural(n, "commit")})
 			}
 		} else {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "unpushed-commit check"})
@@ -180,7 +181,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		// fires even when the addition is fully committed and status is clean.
 		if sm, err := gitx.Run(wt, "submodule", "status", "--recursive"); err == nil {
 			if strings.TrimSpace(sm) != "" {
-				out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: firstLine(sm)})
+				out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: "submodule " + submodulePath(sm)})
 			}
 		} else {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "submodule check"})
@@ -433,15 +434,15 @@ func Remove(c container.C, name string, force bool) error {
 		e := wkterr.New("WKT_WOULD_LOSE_WORK", "removal would lose work")
 		// List every entry, blocking and informational alike, so --force
 		// doesn't become reflexive: the user sees that most of what's in the
-		// way is build output, and one line is their .env (spec §5.7).
+		// way is build output, and one line is their .env (spec §5.7). They
+		// go in Problems; Remedy is reserved for what to actually do.
 		for _, b := range all {
-			line := b.Code
-			if b.Severity == "info" {
-				line = "(not blocking) " + line
-			}
-			e = e.WithRemedy(line + " " + b.Repo + " " + b.Path + " " + b.Detail)
+			e = e.WithProblem(wkterr.Problem{
+				Code: b.Code, Repo: b.Repo, Path: b.Path,
+				Detail: b.Detail, Info: b.Severity == "info",
+			})
 		}
-		return e
+		return e.WithRemedy(remedyFor(blocking, name)...)
 	}
 
 	if err := os.MkdirAll(c.StagingDir(), 0o700); err != nil {
@@ -496,4 +497,89 @@ func finishRemove(c container.C, t state.Task, name, staged string) error {
 		return wkterr.New("WKT_STATE_WRITE", "cannot remove task state").WithPath(name)
 	}
 	return nil
+}
+
+// describePorcelain turns "git status --porcelain" output into one line of
+// prose. Reporting only its first line both leaked git's format and hid
+// every path after the first.
+func describePorcelain(s string) string {
+	// Never slice at a fixed column. Porcelain's status is two columns
+	// (" M f.txt"), but gitx.Run returns trimmed stdout, so the *first*
+	// line arrives with its leading space already gone ("M f.txt") while
+	// the rest keep theirs. Splitting on the first space after the status
+	// handles both; slicing at [3:] silently ate a character of the first
+	// path and reported a file that does not exist.
+	var paths []string
+	for _, l := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		f := strings.SplitN(strings.TrimLeft(l, " "), " ", 2)
+		if len(f) != 2 {
+			continue
+		}
+		p := strings.TrimSpace(f[1])
+		if i := strings.Index(p, " -> "); i >= 0 {
+			p = p[i+len(" -> "):] // a rename: report where it landed
+		}
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	if len(paths) <= 3 {
+		return strconv.Itoa(len(paths)) + " changed: " + strings.Join(paths, ", ")
+	}
+	return strconv.Itoa(len(paths)) + " changed, including " + strings.Join(paths[:3], ", ")
+}
+
+// remedyFor answers the only question a refusal leaves open: what now. It
+// names the action each *blocking* code needs, deduplicated and in a stable
+// order, and never repeats the problem list back at the user.
+func remedyFor(blocking []Blocker, name string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	forceable := true
+	for _, b := range blocking {
+		switch b.Code {
+		case "WKT_DIRTY", "WKT_UNTRACKED_TREE_CONTENT":
+			add("commit or stash the changes, or move them out of the tree")
+		case "WKT_UNPUSHED":
+			add("push the commits, or keep the task")
+		case "WKT_PRECIOUS_IGNORED":
+			add("copy the ignored files you need out of the tree")
+		case "WKT_IN_PROGRESS":
+			add("finish or abort the in-progress git operation")
+		case "WKT_SUBMODULE":
+			add("push the submodule's commits, then git submodule deinit it")
+			forceable = false
+		case "WKT_FOREIGN_REPO":
+			add("move the repository out of the tree: its history exists nowhere else")
+			forceable = false
+		case "WKT_COPY_DIVERGED", "WKT_LINK_SLOT_CHANGED", "WKT_LINK_SLOT_MISSING":
+			add("reconcile the changed file against the workspace copy")
+		case "WKT_CHECK_FAILED":
+			add("re-run once the repository is readable: a check that cannot run is treated as work at risk")
+			forceable = false
+		case "WKT_WORKTREE_MISSING":
+			add("the worktree is gone from disk; wkt rm --force finishes the removal")
+		}
+	}
+	if forceable {
+		add("or wkt rm " + name + " --force once you are sure nothing above matters")
+	}
+	return out
+}
+
+// plural keeps counted details reading like prose rather than like a log line.
+func plural(n, noun string) string {
+	if n == "1" {
+		return n + " " + noun
+	}
+	return n + " " + noun + "s"
 }

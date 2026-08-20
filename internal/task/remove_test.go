@@ -1,6 +1,7 @@
 package task
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"wkt/internal/discover"
 	"wkt/internal/state"
+	"wkt/internal/wkterr"
 )
 
 func TestRemoveRefusesOnIgnoredButPreciousFile(t *testing.T) {
@@ -970,5 +972,108 @@ func TestPreflightFailsClosedWhenTheSubmoduleCheckFails(t *testing.T) {
 
 	if err := Remove(c, task.Name, false); err == nil {
 		t.Fatal("a failed submodule check must block removal")
+	}
+}
+
+// TestRefusalSeparatesProblemsFromRemedy covers adversarial finding F5. The
+// refusal used to pack every blocker into the "remedy" field as
+// "CODE repo path detail", so the field meant to say what to do listed what
+// was wrong, with an empty path and raw git output inside it.
+func TestRefusalSeparatesProblemsFromRemedy(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-shape", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := task.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, ".gitignore"), []byte("dist/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, wt, "add", ".gitignore")
+	g(t, wt, "commit", "-qm", "ignore dist")
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wt, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "dist", "out.js"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Remove(c, "feat-shape", false)
+	if err == nil {
+		t.Fatal("a dirty tree must refuse")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) {
+		t.Fatalf("want a typed error, got %v", err)
+	}
+	if len(e.Problems) == 0 {
+		t.Fatal("the refusal must carry its blockers as problems")
+	}
+	var sawDirty, sawIgnored bool
+	for _, p := range e.Problems {
+		switch p.Code {
+		case "WKT_DIRTY":
+			sawDirty = true
+			if p.Repo == "" || p.Path == "" {
+				t.Fatalf("a blocker must name its repository and path: %+v", p)
+			}
+			if p.Info {
+				t.Fatal("uncommitted work blocks")
+			}
+			// The detail used to be one raw line of git status --porcelain,
+			// which both leaks git's format and hides every path after the
+			// first. Prose, yes — but prose that still names the paths: an
+			// empty detail passes a "not porcelain" check while saying
+			// nothing at all.
+			if p.Detail == "" {
+				t.Fatal("the dirty blocker must say what changed")
+			}
+			if strings.HasPrefix(p.Detail, " M") || strings.HasPrefix(p.Detail, "??") {
+				t.Fatalf("detail must be prose, not porcelain: %q", p.Detail)
+			}
+			if !strings.Contains(p.Detail, "f.txt") {
+				t.Fatalf("the modified path must appear in the detail: %q", p.Detail)
+			}
+		case "WKT_REGENERABLE_IGNORED":
+			sawIgnored = true
+			if !p.Info {
+				t.Fatal("regenerable ignored content is listed, never blocking")
+			}
+		}
+	}
+	if !sawDirty || !sawIgnored {
+		t.Fatalf("want both the dirty blocker and the informational one, got %+v", e.Problems)
+	}
+	if len(e.Remedy) == 0 {
+		t.Fatal("a refusal must say what to do")
+	}
+	for _, r := range e.Remedy {
+		if strings.Contains(r, "WKT_") {
+			t.Fatalf("remedy must hold actions, not problem codes: %q", r)
+		}
+	}
+}
+
+// TestDescribePorcelainKeepsThePaths pins the helper directly. Its first
+// version ran TrimSpace over the whole blob, which shifted " M f" left by one
+// column and silently produced "1 changed: .txt" — a detail that reads fine
+// and names a file that does not exist.
+func TestDescribePorcelainKeepsThePaths(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{" M f.txt\n", "1 changed: f.txt"},
+		{"M f.txt\n", "1 changed: f.txt"}, // gitx.Run trims, so the first line loses its leading space
+		{"?? new.txt\n", "1 changed: new.txt"},
+		{"M  staged.txt\n", "1 changed: staged.txt"},
+		{"R  old.txt -> new.txt\n", "1 changed: new.txt"},
+		{" M a\n?? b\n", "2 changed: a, b"},
+		{" M a\n M b\n M c\n M d\n", "4 changed, including a, b, c"},
+		{"", ""},
+	} {
+		if got := describePorcelain(tc.in); got != tc.want {
+			t.Errorf("describePorcelain(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
