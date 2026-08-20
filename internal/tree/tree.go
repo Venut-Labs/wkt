@@ -9,10 +9,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"wkt/internal/discover"
+	"wkt/internal/paths"
 	"wkt/internal/state"
 	"wkt/internal/wkterr"
 )
@@ -115,12 +117,30 @@ func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *
 
 func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 	var slots []state.LinkSlot
-	link := func(rel string) error {
+	// link creates a whole-directory (or whole-file) link slot at rel.
+	// checkNested gates the nested-repository scan (spec §5.3 rule 4): a
+	// back-filled repository's own slot is deliberately a live link to a
+	// repository wkt already knows about, but an ordinary non-git directory
+	// (p.LinkDirs) must never be linked whole without first walking it for
+	// a repository sitting below the depth-bounded discovery scan — without
+	// that check the SAME real directory becomes writable and shared by
+	// every task's tree, and by the workspace itself.
+	link := func(rel string, checkNested bool) error {
 		dst := filepath.Join(treeRoot, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return wkterr.New("WKT_TREE_BUILD", "cannot create an ancestor directory").WithPath(dst)
 		}
 		src := filepath.Join(workspace, rel) // absolute target (spec §5.3 rule 3)
+		if checkNested {
+			resolved, rerr := paths.Canonical(src)
+			if rerr != nil {
+				resolved = src
+			}
+			if found := findNestedRepo(resolved); found != "" {
+				return wkterr.New("WKT_NESTED_REPO", "a repository lies beneath a directory wkt would otherwise link whole").
+					WithPath(dst).WithFound(found)
+			}
+		}
 		switch info, err := os.Lstat(dst); {
 		case err == nil && info.Mode()&os.ModeSymlink != 0:
 			// Already a symlink. Only a match on the exact intended target is
@@ -151,8 +171,13 @@ func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 		slots = append(slots, state.LinkSlot{RelPath: rel, Target: src, Type: "symlink"})
 		return nil
 	}
-	for _, rel := range append(append([]string{}, p.BackFill...), p.LinkDirs...) {
-		if err := link(rel); err != nil {
+	for _, rel := range p.BackFill {
+		if err := link(rel, false); err != nil {
+			return nil, err
+		}
+	}
+	for _, rel := range p.LinkDirs {
+		if err := link(rel, true); err != nil {
 			return nil, err
 		}
 	}
@@ -166,6 +191,35 @@ func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 		slots = append(slots, state.LinkSlot{RelPath: rel, Target: src, Type: "copy", Hash: sum})
 	}
 	return slots, nil
+}
+
+// findNestedRepo walks dir to unbounded depth, never following symlinks,
+// looking for a ".git" marker at any depth — a repository sitting below
+// the depth-bounded repository *enumeration* scan (spec §5.3 rule 4: "two
+// different scans, two different bounds"). It returns the first
+// repository directory found, or "" if none. An unreadable subtree is
+// skipped, not treated as a scan failure — the same convention
+// discover.Walk already uses for repository enumeration.
+func findNestedRepo(dir string) string {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	var found string
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable subtree: skip, do not abort the walk
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // never follow symlinks
+		}
+		if d.Name() != ".git" {
+			return nil
+		}
+		found = filepath.Dir(p)
+		return fs.SkipAll
+	})
+	return found
 }
 
 func copyFile(src, dst string) (string, error) {

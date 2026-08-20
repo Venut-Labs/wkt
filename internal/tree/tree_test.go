@@ -3,6 +3,7 @@ package tree
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -293,4 +294,54 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestLinkDirRefusesWhenItHidesANestedRepoBelowTheDiscoveryBound reproduces
+// review finding Important 7: PlanFor's repository *enumeration* stops at
+// a configurable depth (default 4) and Materialise used to link any
+// non-git directory whole regardless — so a repository sitting deeper than
+// that bound was invisible to discovery yet still made its containing
+// directory a single real directory shared, writable, by every task's tree
+// and by the workspace itself. Spec §5.3 rule 4 requires every symlink
+// target to be separately resolved and walked, unbounded depth, before the
+// link is created.
+func TestLinkDirRefusesWhenItHidesANestedRepoBelowTheDiscoveryBound(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	deep := filepath.Join(ws, "notes", "a", "b", "c", "d", "hidden")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initCmd := exec.Command("git", "-c", "init.defaultBranch=main", "init", "-q", deep)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s", out)
+	}
+
+	// Nothing discovered at all: "notes" plans as an ordinary whole-directory
+	// link, exactly as it would for a workspace where "hidden" sits beyond
+	// the discovery depth and so was never classified as a repository.
+	p, err := PlanFor(ws, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(p.LinkDirs, "notes") {
+		t.Fatalf("notes must be planned as a whole-directory link, got %+v", p)
+	}
+
+	treeRoot := filepath.Join(base, "tree")
+	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Materialise(treeRoot, ws, p)
+	if err == nil {
+		t.Fatal("Materialise must refuse to link a directory that hides a nested repository below the discovery bound")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) || e.Code != "WKT_NESTED_REPO" {
+		t.Fatalf("expected WKT_NESTED_REPO, got %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(treeRoot, "notes")); !os.IsNotExist(statErr) {
+		t.Fatal("the refused link must never have been created — a shared writable slot must never exist")
+	}
 }
