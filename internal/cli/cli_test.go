@@ -635,3 +635,100 @@ func TestSplitPositionalDerivesValueFlagsFromTheFlagSet(t *testing.T) {
 		t.Fatalf("got positional %q, want %q — a boolean flag must not swallow the following token", positional2, "task2")
 	}
 }
+
+// TestNewWithASeparatorInTheTaskNameCreatesNothing covers adversarial
+// finding F1 end to end: the refusal must happen before anything is built,
+// so no debris is left in trees/ to block a later, legitimate task name.
+func TestNewWithASeparatorInTheTaskNameCreatesNothing(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "feature/x", "--all", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatalf("new must refuse a task name carrying a path separator; stderr=%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_BAD_TASK_NAME") {
+		t.Fatalf("want WKT_BAD_TASK_NAME, got %s", errb.String())
+	}
+	trees := filepath.Join(ws+".worktrees", "trees")
+	ents, err := os.ReadDir(trees)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("the refusal must leave trees/ empty, found %d entries", len(ents))
+	}
+	// The name whose slot the debris used to occupy must still be usable.
+	out.Reset()
+	if code := Run([]string{"new", "feature", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the plain name must remain available, exited %d: %s", code, errb.String())
+	}
+}
+
+// TestTreeExistsRemedyIsActionable covers the second half of F1: the old
+// remedy suggested "wkt rm <task>", which answers WKT_NO_TASK when only the
+// directory exists — a dead end that left the user with no documented way out.
+func TestTreeExistsRemedyIsActionable(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	orphan := filepath.Join(ws+".worktrees", "trees", "orphan")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := Run([]string{"new", "orphan", "--all", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("new must refuse when the tree directory is already there")
+	}
+	msg := errb.String()
+	if !strings.Contains(msg, "WKT_TREE_EXISTS") {
+		t.Fatalf("want WKT_TREE_EXISTS, got %s", msg)
+	}
+	if strings.Contains(msg, "wkt rm orphan") {
+		t.Fatalf("the remedy must not recommend a command that answers WKT_NO_TASK: %s", msg)
+	}
+	if !strings.Contains(msg, orphan) {
+		t.Fatalf("the remedy must name the directory to deal with: %s", msg)
+	}
+}
+
+// TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule covers F3 at the
+// CLI seam: the warning goes to stderr and the command still succeeds.
+func TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(base, "lib"))
+	seedRepo(t, filepath.Join(ws, "super"))
+	sub := filepath.Join(ws, "super")
+	for _, args := range [][]string{
+		{"-c", "protocol.file.allow=always", "submodule", "add", "-q", filepath.Join(base, "lib"), "vendor"},
+		{"commit", "-qm", "add submodule"},
+	} {
+		cmd := exec.Command("git", append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)...)
+		cmd.Dir = sub
+		if o, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, o)
+		}
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new must still succeed, exited %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_SUBMODULE") || !strings.Contains(errb.String(), "super") {
+		t.Fatalf("new must warn on stderr that super carries a submodule, got %q", errb.String())
+	}
+}

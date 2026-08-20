@@ -150,6 +150,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 		selected := selection(entries, *repos, *all)
+		// Spec §5.7: warn before the work starts, because rm refuses on a
+		// submodule even with --force, so a task created over one cannot be
+		// removed by any wkt command until the submodule is deinitialised.
+		for _, w := range task.SubmoduleWarnings(entries, selected) {
+			fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
+				w.Code, w.Repo, w.Detail)
+		}
 		t, err := task.Create(c, entries, positional, selected)
 		if err != nil {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2

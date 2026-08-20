@@ -51,6 +51,18 @@ func resolveBase(repoAbs string) (sha, ref string, err error) {
 // ancestry, case-fold collisions and D/F ref conflicts for every selected
 // repository before phase two touches anything.
 func Validate(c container.C, entries []discover.Entry, name string, selected []string) ([]state.Repo, error) {
+	// The task name is a branch name *and* a path segment: trees/<name>,
+	// state/tasks/<name>.json, staging/<name>. check-ref-format accepts
+	// "feature/x" because it is a perfectly good branch name, but as a path
+	// it makes the state write fail on a directory that does not exist —
+	// after the tree was already built — and the rollback then leaves an
+	// empty trees/feature behind that blocks the plain name "feature"
+	// forever. Refuse the separator here, before anything is created.
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return nil, wkterr.New("WKT_BAD_TASK_NAME", "the task name is also a directory name, so it cannot contain a path separator").
+			WithFound(name).
+			WithRemedy("use a single-segment name such as " + flatten(name))
+	}
 	if !gitx.RunOK(".", "check-ref-format", "--branch", name) {
 		return nil, wkterr.New("WKT_BAD_TASK_NAME", "not a valid branch name").WithFound(name)
 	}
@@ -140,8 +152,14 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 	// directory, and it also stops a stale leftover tree from being
 	// silently adopted.
 	if _, err := os.Stat(treeRoot); err == nil {
-		return state.Task{}, wkterr.New("WKT_TREE_EXISTS", "the task tree directory already exists").
-			WithPath(treeRoot).WithRemedy("wkt status "+name, "wkt rm "+name)
+		// Not "wkt rm <name>": this branch is only reachable when no task
+		// state exists (a task with state fails above as WKT_TASK_EXISTS),
+		// and rm on a stateless directory answers WKT_NO_TASK — a dead end
+		// that left the user with no documented way out.
+		return state.Task{}, wkterr.New("WKT_TREE_EXISTS", "the task tree directory already exists, but no task owns it").
+			WithPath(treeRoot).
+			WithRemedy("inspect the directory: it is left over from an interrupted create",
+				"remove it once you are sure it holds nothing you need, then retry")
 	} else if !os.IsNotExist(err) {
 		return state.Task{}, wkterr.New("WKT_CHECK_FAILED", "cannot check the task tree directory").WithPath(treeRoot)
 	}
@@ -291,4 +309,53 @@ func worktreeName(worktreePath string) (string, error) {
 			WithPath(worktreePath)
 	}
 	return name, nil
+}
+
+// flatten suggests a single-segment spelling of a name that carried
+// separators, so the refusal above names a usable alternative.
+func flatten(name string) string {
+	f := strings.NewReplacer("/", "-", "\\", "-").Replace(strings.Trim(name, `/\`))
+	if f == "" || f == "." || f == ".." {
+		return "task"
+	}
+	return f
+}
+
+// SubmoduleWarnings names every selected repository that carries a submodule.
+// Spec §5.7 requires the warning because rm refuses on a submodule even with
+// --force — its object store lives under the doomed worktree — so a task
+// created over one cannot be removed by any wkt command until the submodule
+// is deinitialised. Warning at create time is the difference between knowing
+// that before the work starts and discovering it at teardown.
+func SubmoduleWarnings(entries []discover.Entry, selected []string) []Blocker {
+	byRel := map[string]discover.Entry{}
+	for _, e := range entries {
+		byRel[e.RelPath] = e
+	}
+	var out []Blocker
+	for _, rel := range selected {
+		e, ok := byRel[rel]
+		if !ok || e.Kind != discover.KindRepo {
+			continue
+		}
+		sm, err := gitx.Run(e.AbsPath, "submodule", "status", "--recursive")
+		if err != nil || strings.TrimSpace(sm) == "" {
+			continue
+		}
+		out = append(out, Blocker{
+			Code: "WKT_SUBMODULE", Repo: rel, Path: e.AbsPath,
+			Detail: submodulePath(sm), Severity: "info",
+		})
+	}
+	return out
+}
+
+// submodulePath pulls the submodule's path out of a "git submodule status"
+// line ("<status><sha> <path> (<describe>)") instead of surfacing the raw
+// line, which leads with a bare SHA and reads as noise.
+func submodulePath(status string) string {
+	if f := strings.Fields(firstLine(status)); len(f) >= 2 {
+		return f[1]
+	}
+	return strings.TrimSpace(firstLine(status))
 }

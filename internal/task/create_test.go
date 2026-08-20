@@ -328,3 +328,66 @@ func TestCreateRefusesAndDoesNotTouchAPreExistingTreeDirectory(t *testing.T) {
 		t.Fatalf("refusing up front must mean nothing was ever created for either repository, found pin %q", out)
 	}
 }
+
+// TestValidateRejectsATaskNameThatIsNotOneSafePathSegment covers adversarial
+// finding F1. "feature/x" is a perfectly valid *branch* name, so
+// check-ref-format waves it through — but the task name is also a path
+// segment (trees/<name>, state/tasks/<name>.json), and a name carrying a
+// separator made Create build the tree, fail at the state write, roll back,
+// and leave an empty trees/feature behind that then blocked the plain name
+// "feature" forever.
+func TestValidateRejectsATaskNameThatIsNotOneSafePathSegment(t *testing.T) {
+	c, entries := fixture(t)
+	for _, name := range []string{"feature/x", "a/b/c", "sub/dir/task", "with\\backslash"} {
+		_, err := Validate(c, entries, name, []string{"docs"})
+		if err == nil {
+			t.Fatalf("%q must be refused: the task name is a path segment", name)
+		}
+		var e *wkterr.E
+		if !errors.As(err, &e) || e.Code != "WKT_BAD_TASK_NAME" {
+			t.Fatalf("%q: got %v, want WKT_BAD_TASK_NAME", name, err)
+		}
+	}
+}
+
+// TestValidateStillAcceptsOrdinaryTaskNames pins the other side of F1's fix:
+// the guard must reject separators, not tighten the name rules generally.
+func TestValidateStillAcceptsOrdinaryTaskNames(t *testing.T) {
+	c, entries := fixture(t)
+	for _, name := range []string{"feat-42", "feat_42", "FEAT.42", "задача"} {
+		if _, err := Validate(c, entries, name, []string{"docs"}); err != nil {
+			t.Fatalf("%q must be accepted, got %v", name, err)
+		}
+	}
+}
+
+// TestSubmoduleWarningsNamesEverySelectedRepositoryWithASubmodule covers
+// adversarial finding F3. Spec §5.7 requires wkt new to warn while the
+// submodule route is unimplemented, because rm refuses on a submodule even
+// with --force: creating such a task silently produces one that cannot be
+// removed by any wkt command at all.
+func TestSubmoduleWarningsNamesEverySelectedRepositoryWithASubmodule(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seed(t, filepath.Join(ws, "plain"))
+	seed(t, filepath.Join(base, "lib"))
+	seed(t, filepath.Join(ws, "super"))
+	g(t, filepath.Join(ws, "super"), "-c", "protocol.file.allow=always",
+		"submodule", "add", "-q", filepath.Join(base, "lib"), "vendor")
+	g(t, filepath.Join(ws, "super"), "commit", "-qm", "add submodule")
+
+	entries, err := discover.Walk(ws, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := SubmoduleWarnings(entries, []string{"plain", "super"})
+	if len(warned) != 1 || warned[0].Repo != "super" {
+		t.Fatalf("want exactly one warning naming super, got %+v", warned)
+	}
+	if warned[0].Code != "WKT_SUBMODULE" {
+		t.Fatalf("warning must carry WKT_SUBMODULE, got %q", warned[0].Code)
+	}
+	if SubmoduleWarnings(entries, []string{"plain"}) != nil {
+		t.Fatal("a selection without submodules must warn about nothing")
+	}
+}
