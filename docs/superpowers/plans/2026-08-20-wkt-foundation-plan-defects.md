@@ -107,15 +107,26 @@ Verified against reality rather than argued:
 |---|---|---|
 | F1 | `feature/x` — a valid *branch* name — passed validation, the tree was built, the state write failed on a missing directory, the rollback left an empty `trees/feature`, and that debris blocked the plain name `feature` forever. `WKT_TREE_EXISTS` recommended `wkt rm feature`, which answers `WKT_NO_TASK`: a dead end. | Refuse a task name that is not one path segment, in phase one; make the leftover-directory remedy name the directory. |
 | F3 | Spec §5.7 requires `wkt new` to warn when a selected repository carries a submodule, because `rm` refuses on one **even with `--force`**. The warning was never implemented, so such a task was created silently and could then not be removed by any wkt command. | `task.SubmoduleWarnings`, printed by `new` on stderr before anything is created. |
+| F2 | Spec §1 promised the workspace "reachable **read-only**", a guarantee only the perimeter provides — and the perimeter was descoped from v0. Verified by writing through a back-fill link into the workspace. | §1 now says "reachable in place", with the v0 limitation stated in §1.1 and the README. The mechanism itself is v0.1. |
+| F4 | `wkt init --exclude <path>` was promised twice (§5.3 rule 6, §7.1) and existed nowhere, so a workspace containing a genuine nested repository could not be adopted at all. | Implemented, cumulative across runs via `state/container.json`, refusing a path that is not nested. Battery scenario 10 covers it. |
+| F5 | Every blocker was rendered into the error's `remedy` field as `Code Repo Path Detail`, so "what to do" listed what was wrong, with an empty path and raw `git submodule status` output inside it. | `wkterr.Problem` (zero value blocks, so callers fail closed) carries the blockers; `remedy` now names actions per blocking code. `WKT_DIRTY` and `WKT_SUBMODULE` report prose. |
+| F8 | The plan's interface list promised a "stale-PID sweep" on `container.Lock` that does not exist and is not needed. | Corrected: the kernel drops an `flock` when its holder dies; the PID is written only so a refusal can name the holder. |
+| F9 | The plan's "Consumes" lines disagreed with the real import graph in three tasks. | Corrected against the actual imports, per file for the two tasks that share the `task` package. |
 
 ## Defects found (open)
 
 | # | Defect | Why it matters |
 |---|---|---|
-| F2 | Spec §1 promises "the rest of the workspace reachable **read-only**". In v0 a back-fill link is fully writable — verified by writing through one. The mechanism that made it read-only is the perimeter, which was descoped from v0. | The spec states a guarantee the shipped product does not provide. Either reword §1 until the perimeter lands, or land it. |
-| F4 | `wkt init --exclude <path>` is promised twice (§5.3 rule 6 and the §7.1 command table) and exists nowhere — not in the plan, not in the code. | A workspace containing a genuine nested repository cannot be adopted at all: `init` refuses and the documented escape hatch does not exist. |
-| F5 | Blockers are rendered into the error's `remedy` field as `Code Repo Path Detail`, so "what to do" holds a list of problems, `Path` is empty, and `Detail` carries raw `git submodule status` output — against the global rule never to surface raw git output. | The refusal message is the product's main interaction at teardown, and it currently reads as noise. |
 | F6 | Every verb shares one `FlagSet`: `wkt init --force --repos zzz` and `wkt path t --force --all` are accepted silently. | Same class as defect 24 above — input that means nothing is taken as success. |
 | F7 | `container.Lock` is `LOCK_NB` with no wait or retry, so two agents running `wkt new` at the same time make one of them fail with `WKT_LOCKED`. | The spec's own premise is two agents working at once. Correct, but abrasive. |
-| F8 | The plan's interface list promises a "stale-PID sweep" on `container.Lock`; there is none, and none is needed (flock is released by the kernel). | Plan prose describing behaviour the code does not have is how the last round's defects started. |
-| F9 | The plan's "Consumes" lines disagree with the real import graph: task 2 claims `wkterr` (imports nothing), task 3 claims `gitx` and `wkterr` (imports only `paths`), task 7 omits `paths` (imports it). | Same class as F8. |
+
+## One defect this pass introduced, and caught
+
+The first `describePorcelain` ran `TrimSpace` over the whole `git status
+--porcelain` blob, which shifts every path one column left; combined with
+`gitx.Run` already returning trimmed stdout, it reported `1 changed: .txt`
+for a file named `f.txt`. The test that was supposed to guard it only
+asserted "not porcelain", which an empty string satisfies. Both the helper
+and the test were fixed, and the helper now has a table test of its own —
+the same lesson as defects 26 through 32 above, one round later.
+

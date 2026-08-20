@@ -41,11 +41,13 @@
 - Create: `internal/wkterr/wkterr.go`
 - Create: `internal/gitx/gitx.go`
 - Test: `internal/gitx/gitx_test.go`
+- Test: `internal/wkterr/wkterr_test.go`
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
   - `wkterr.E{Code, Message, Repo, Path, Expected, Found, Remedy []string}` implementing `error`; constructor `wkterr.New(code, msg string) *E`; methods `WithRepo(string) *E`, `WithPath(string) *E`, `WithExpected(string) *E`, `WithFound(string) *E`, `WithRemedy(...string) *E`; `wkterr.JSON(err error) []byte`.
+  - `wkterr.Problem{Code, Repo, Path, Detail string, Info bool}` with `WithProblem(Problem) *E` — what is in the way, kept apart from `Remedy`, which is what to do about it. The zero value **blocks**: a caller who forgets the flag fails closed.
   - `gitx.Run(dir string, args ...string) (string, error)` — trimmed stdout, or a `*wkterr.E` with code `WKT_GIT_FAILED` whose `Found` is the **first line** of stderr.
   - `gitx.RunOK(dir string, args ...string) bool`.
   - `gitx.Version() (major, minor int, err error)`.
@@ -158,6 +160,59 @@ func TestParseVersion(t *testing.T) {
 }
 ```
 
+The typed error carries its own test, because the split between `problems` and `remedy` is a contract the rest of the tool depends on:
+
+```go
+// internal/wkterr/wkterr_test.go
+package wkterr
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// TestProblemsAreCarriedSeparatelyFromRemedy covers adversarial finding F5.
+// A refusal has two different things to say — what is in the way, and what to
+// do about it — and folding the first into the second left "remedy" holding a
+// list of problems and no action at all.
+func TestProblemsAreCarriedSeparatelyFromRemedy(t *testing.T) {
+	e := New("WKT_WOULD_LOSE_WORK", "removal would lose work").
+		WithProblem(Problem{Code: "WKT_DIRTY", Repo: "svc-a", Detail: "2 modified paths"}).
+		WithProblem(Problem{Code: "WKT_REGENERABLE_IGNORED", Repo: "svc-a", Path: "dist/", Info: true}).
+		WithRemedy("commit or stash the changes, then retry")
+
+	var got struct {
+		Problems []Problem `json:"problems"`
+		Remedy   []string  `json:"remedy"`
+	}
+	if err := json.Unmarshal(JSON(e), &got); err != nil {
+		t.Fatalf("error JSON must parse: %v", err)
+	}
+	if len(got.Problems) != 2 {
+		t.Fatalf("want both problems, got %+v", got.Problems)
+	}
+	if got.Problems[0].Info {
+		t.Fatal("a problem blocks unless it says otherwise — the zero value must fail closed")
+	}
+	if !got.Problems[1].Info {
+		t.Fatal("an informational problem must not read as blocking")
+	}
+	if len(got.Remedy) != 1 || strings.Contains(got.Remedy[0], "WKT_") {
+		t.Fatalf("remedy must hold actions, not problem codes: %v", got.Remedy)
+	}
+}
+
+// TestErrorStaysOneLine pins the constraint the whole type exists for: no
+// error surface may span lines, because raw git stderr must never reach it.
+func TestErrorStaysOneLine(t *testing.T) {
+	e := New("WKT_X", "boom").WithProblem(Problem{Code: "WKT_DIRTY", Detail: "a\nb"})
+	if strings.Contains(e.Error(), "\n") {
+		t.Fatalf("Error() must stay single-line, got %q", e.Error())
+	}
+}
+```
+
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `go test ./internal/gitx/ -run TestRun -v`
@@ -172,16 +227,61 @@ package wkterr
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type E struct {
-	Code     string   `json:"code"`
-	Message  string   `json:"message"`
-	Repo     string   `json:"repo,omitempty"`
-	Path     string   `json:"path,omitempty"`
-	Expected string   `json:"expected,omitempty"`
-	Found    string   `json:"found,omitempty"`
-	Remedy   []string `json:"remedy,omitempty"`
+	Code     string    `json:"code"`
+	Message  string    `json:"message"`
+	Repo     string    `json:"repo,omitempty"`
+	Path     string    `json:"path,omitempty"`
+	Expected string    `json:"expected,omitempty"`
+	Found    string    `json:"found,omitempty"`
+	Problems []Problem `json:"problems,omitempty"`
+	Remedy   []string  `json:"remedy,omitempty"`
+}
+
+// Problem is one thing standing in the way, as opposed to Remedy, which is
+// what to do about it. Keeping them apart is the whole point: a refusal that
+// lists its blockers under "remedy" tells the user what is wrong twice and
+// what to do never.
+type Problem struct {
+	Code   string
+	Repo   string
+	Path   string
+	Detail string
+	// Info marks a problem that is reported but does not block. The zero
+	// value therefore blocks, so a caller who forgets the field fails
+	// closed — the same rule the teardown checks follow.
+	Info bool
+}
+
+// MarshalJSON writes the positive form ("blocking": true) while the Go field
+// stays the negative one, so the zero value keeps failing closed.
+func (p Problem) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Code     string `json:"code"`
+		Repo     string `json:"repo,omitempty"`
+		Path     string `json:"path,omitempty"`
+		Detail   string `json:"detail,omitempty"`
+		Blocking bool   `json:"blocking"`
+	}{p.Code, p.Repo, p.Path, p.Detail, !p.Info})
+}
+
+// UnmarshalJSON is the inverse, so a caller can round-trip an error.
+func (p *Problem) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Code     string `json:"code"`
+		Repo     string `json:"repo,omitempty"`
+		Path     string `json:"path,omitempty"`
+		Detail   string `json:"detail,omitempty"`
+		Blocking bool   `json:"blocking"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*p = Problem{Code: raw.Code, Repo: raw.Repo, Path: raw.Path, Detail: raw.Detail, Info: !raw.Blocking}
+	return nil
 }
 
 func New(code, msg string) *E { return &E{Code: code, Message: msg} }
@@ -198,6 +298,14 @@ func (e *E) WithPath(p string) *E      { e.Path = p; return e }
 func (e *E) WithFound(f string) *E     { e.Found = f; return e }
 func (e *E) WithExpected(x string) *E  { e.Expected = x; return e }
 func (e *E) WithRemedy(r ...string) *E { e.Remedy = append(e.Remedy, r...); return e }
+
+// WithProblem records one blocker. Detail is flattened to a single line here
+// rather than at every call site, because the callers feed it git output.
+func (e *E) WithProblem(p Problem) *E {
+	p.Detail = strings.Join(strings.Fields(p.Detail), " ")
+	e.Problems = append(e.Problems, p)
+	return e
+}
 
 func JSON(err error) []byte {
 	if err == nil {
@@ -301,7 +409,7 @@ git commit -m "feat: git wrapper and typed errors"
 - Test: `internal/paths/paths_test.go`
 
 **Interfaces:**
-- Consumes: `wkterr`.
+- Consumes: nothing — path arithmetic has no errors to type.
 - Produces:
   - `paths.Canonical(p string) (string, error)` — absolute, symlinks resolved. Resolves the **nearest existing ancestor** and re-appends the missing tail, so a path that does not exist yet canonicalises the same way its parent does.
   - `paths.Spellings(p string) []string` — every spelling of one path: as given (absolutised), canonical, and on macOS the `/private`-prefixed and `/private`-stripped forms. Deduplicated, stable order.
@@ -501,7 +609,7 @@ git commit -m "feat: path canonicalisation and spellings"
 - Test: `internal/discover/discover_test.go`
 
 **Interfaces:**
-- Consumes: `gitx`, `paths`, `wkterr`.
+- Consumes: `paths`.
 - Produces:
   - `discover.Kind` with constants `KindRepo`, `KindLinkedWorktree`, `KindSubmodule`, `KindNested`.
   - `discover.Entry{RelPath, AbsPath string; Kind Kind; ContainedBy string}`.
@@ -1040,10 +1148,10 @@ git commit -m "feat: repository discovery with .git marker classification"
 **Interfaces:**
 - Consumes: `paths`, `wkterr`.
 - Produces:
-  - `container.C{Root, Workspace string}` with methods `StoreDir() string`, `TreesDir() string`, `StateDir() string`, `StagingDir() string`, `TreePath(task string) string`.
+  - `container.C{Root, Workspace string}` with methods `StoreDir() string`, `TreesDir() string`, `StateDir() string`, `ConfigDir() string`, `StagingDir() string`, `TreePath(task string) string`.
   - `container.Locate(workspace string) (C, error)` — `<workspace>.worktrees` when the parent is writable, otherwise `~/.local/state/wkt/<hash>`; never a descendant of the workspace, and it **refuses** rather than returning a container inside it (the fallback's own trigger is an unwritable parent, which `$HOME` as the workspace satisfies while `~/.local/state` sits inside it).
   - `container.Create(c C) error` — creates the four subdirectories, 0o700.
-  - `container.Lock(c C) (release func(), err error)` — one exclusive lock per container, stale-PID sweep. `release` unlocks and closes but **never unlinks** the lock file: unlinking lets a second party flock the orphaned inode while a third flocks a freshly created one.
+  - `container.Lock(c C) (release func(), err error)` — one exclusive lock per container. The holder's PID is written into the file so a refusal can name it; no stale-PID sweep is needed, because the kernel drops an `flock` when its holder dies. `release` unlocks and closes but **never unlinks** the lock file: unlinking lets a second party flock the orphaned inode while a third flocks a freshly created one.
 
 **Traps:**
 
@@ -1225,6 +1333,10 @@ func (c C) TreesDir() string   { return filepath.Join(c.Root, "trees") }
 func (c C) StateDir() string   { return filepath.Join(c.Root, "state", "tasks") }
 func (c C) StagingDir() string { return filepath.Join(c.Root, "staging") }
 
+// ConfigDir holds the container's own state, as opposed to StateDir, which
+// holds one file per task.
+func (c C) ConfigDir() string { return filepath.Join(c.Root, "state") }
+
 func (c C) TreePath(task string) string { return filepath.Join(c.TreesDir(), task) }
 
 func Locate(workspace string) (C, error) {
@@ -1323,6 +1435,7 @@ git commit -m "feat: container layout, location fallback and exclusive lock"
   - `state.LinkSlot{RelPath, Target, Type string}` where `Type` is `"symlink"` or `"copy"`; copies carry `Hash`.
   - `state.Task{SchemaVersion int, Name, Container, Workspace string, WorkspaceSpellings []string, BaseEpoch time.Time, Repos []Repo, Links []LinkSlot, PerimeterCoverage []string, PerimeterHashes map[string]string}`.
   - `state.Save(dir string, t Task) error` — write to a temporary file in the same directory, then rename.
+  - `state.Container{SchemaVersion int, Excluded []string}` with `state.SaveContainer(dir string, c Container) error` and `state.LoadContainer(dir string) (Container, error)` — the container's own state (spec §5.3 rule 6 records init's `--exclude` decisions here). A container that has never excluded anything has no file, which is not an error; an unreadable or future-schema one is.
   - `state.Load(dir, name string) (Task, error)` — rejects a `SchemaVersion` newer than this binary understands, with a typed error. `state.List(dir string) ([]string, error)` — files only; a directory named `something.json` is not a task.
 
 **Traps:**
@@ -1507,6 +1620,52 @@ func TestLoadRejectsNewerSchemaVersion(t *testing.T) {
 		t.Fatalf("error must mention WKT_STATE_VERSION: %v", err)
 	}
 }
+
+// TestContainerStateRoundTrips covers adversarial finding F4: init's
+// --exclude decision has to survive the command that made it, because spec
+// §5.3 rule 6 calls it "recorded in container state" — a workspace whose
+// nested repository is excluded must stay adoptable on every later run.
+func TestContainerStateRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveContainer(dir, Container{Excluded: []string{"a/inner", "b/deep"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadContainer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Excluded) != 2 || got.Excluded[0] != "a/inner" {
+		t.Fatalf("excluded paths must round-trip, got %+v", got)
+	}
+	if got.SchemaVersion != SchemaVersion {
+		t.Fatalf("save must stamp the schema version, got %d", got.SchemaVersion)
+	}
+}
+
+// TestLoadContainerOnAFreshContainerIsEmptyNotAnError pins the ordinary case:
+// a container that has never excluded anything has no file at all.
+func TestLoadContainerOnAFreshContainerIsEmptyNotAnError(t *testing.T) {
+	got, err := LoadContainer(t.TempDir())
+	if err != nil {
+		t.Fatalf("a missing container file is the normal state, got %v", err)
+	}
+	if len(got.Excluded) != 0 {
+		t.Fatalf("want nothing excluded, got %+v", got)
+	}
+}
+
+// TestLoadContainerRejectsANewerSchema mirrors the task-state guard: a file
+// written by a future binary must not be misparsed by this one.
+func TestLoadContainerRejectsANewerSchema(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "container.json"),
+		[]byte(`{"schema_version":99,"excluded":["x"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadContainer(dir); err == nil {
+		t.Fatal("a newer schema version must be refused, not read")
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1638,12 +1797,83 @@ func List(dir string) ([]string, error) {
 	}
 	return out, nil
 }
+
+// Container is the container's own state, as opposed to a task's: decisions
+// made at init time that every later command has to honour. Spec §5.3 rule 6
+// requires the nested-repository exclusions to be "recorded in container
+// state", because a workspace whose nested repository was excluded once must
+// stay adoptable without repeating the flag.
+type Container struct {
+	SchemaVersion int      `json:"schema_version"`
+	Excluded      []string `json:"excluded,omitempty"`
+}
+
+func containerPath(dir string) string { return filepath.Join(dir, "container.json") }
+
+// SaveContainer writes the container state through the same temp-file-then-
+// rename dance Save uses, so a reader never sees a partial file.
+func SaveContainer(dir string, c Container) error {
+	c.SchemaVersion = SchemaVersion
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return wkterr.New("WKT_STATE_WRITE", "cannot create the state directory").WithPath(dir)
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return wkterr.New("WKT_STATE_WRITE", "cannot encode container state").WithFound(err.Error())
+	}
+	tmp, err := os.CreateTemp(dir, "container.*.tmp")
+	if err != nil {
+		return wkterr.New("WKT_STATE_WRITE", "cannot create a temporary state file").WithPath(dir)
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return wkterr.New("WKT_STATE_WRITE", "cannot write container state").WithPath(tmp.Name())
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return wkterr.New("WKT_STATE_WRITE", "cannot close the temporary state file").WithPath(tmp.Name())
+	}
+	if err := os.Rename(tmp.Name(), containerPath(dir)); err != nil {
+		_ = os.Remove(tmp.Name())
+		return wkterr.New("WKT_STATE_WRITE", "cannot commit container state").WithPath(containerPath(dir))
+	}
+	return nil
+}
+
+// LoadContainer reads the container state. A container that has never
+// excluded anything simply has no file, which is the ordinary case and not
+// an error — but an unreadable or future-schema file is, because guessing
+// there would silently drop an exclusion the user made on purpose.
+func LoadContainer(dir string) (Container, error) {
+	b, err := os.ReadFile(containerPath(dir))
+	if os.IsNotExist(err) {
+		return Container{SchemaVersion: SchemaVersion}, nil
+	}
+	if err != nil {
+		return Container{}, wkterr.New("WKT_STATE_CORRUPT", "container state is not readable").
+			WithPath(containerPath(dir)).WithFound(err.Error())
+	}
+	var c Container
+	if err := json.Unmarshal(b, &c); err != nil {
+		return Container{}, wkterr.New("WKT_STATE_CORRUPT", "container state is not readable").
+			WithPath(containerPath(dir)).WithFound(err.Error())
+	}
+	if c.SchemaVersion > SchemaVersion {
+		return Container{}, wkterr.New("WKT_STATE_VERSION", "container state was written by a newer wkt").
+			WithPath(containerPath(dir)).
+			WithExpected(strconv.Itoa(SchemaVersion)).
+			WithFound(strconv.Itoa(c.SchemaVersion)).
+			WithRemedy("upgrade wkt")
+	}
+	return c, nil
+}
 ```
 
 - [ ] **Step 4: Run the tests**
 
 Run: `go test ./internal/state/ -v`
-Expected: all five tests PASS.
+Expected: all eight tests PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2002,7 +2232,7 @@ git commit -m "feat: store construction with base pin, de-borrow and two remotes
 - Test: `internal/tree/tree_test.go`
 
 **Interfaces:**
-- Consumes: `discover`, `state`, `wkterr`.
+- Consumes: `discover`, `paths`, `state`, `wkterr`.
 - Produces:
   - `tree.Plan{Materialise []string; BackFill []string; LinkDirs []string; CopyFiles []string}`.
   - `tree.PlanFor(workspace string, entries []discover.Entry, selected []string) (Plan, error)` — walks the **whole** workspace, not just its immediate children, so content sitting beside a nested repository inside an ancestor directory still reaches the tree.
@@ -2748,7 +2978,7 @@ git commit -m "feat: mirrored tree materialisation with back-filled repositories
 - Test: `internal/task/create_test.go`
 
 **Interfaces:**
-- Consumes: `container`, `discover`, `gitx`, `state`, `store`, `tree`, `wkterr`.
+- Consumes: `container`, `discover`, `gitx`, `paths`, `state`, `store`, `tree`, `wkterr`.
 - Produces:
   - `task.Resolution{Repo state.Repo; Problems []*wkterr.E}`.
   - `task.SubmoduleWarnings(entries []discover.Entry, selected []string) []Blocker` — names every selected repository carrying a submodule, so `new` can warn (spec §5.7).
@@ -3582,7 +3812,7 @@ git commit -m "feat: two-phase task create with full rollback"
 - Produces:
   - `task.Blocker{Code, Repo, Path, Detail, Severity string}` — `Severity` is `""` (blocking) or `"info"` (reported, never blocking), so regenerable ignored content can be listed without refusing on it.
   - `task.Preflight(c container.C, t state.Task) ([]Blocker, error)` — enumerates from the filesystem, never from state; walks real directories only and never descends link slots.
-  - `task.Remove(c container.C, name string, force bool) error` — refuses while any blocker exists; with `force`, renames the whole tree into `staging/` first, then removes from there. Recovers a task whose tree is already missing or half-staged, so an interrupted removal can be finished rather than being stuck forever.
+  - `task.Remove(c container.C, name string, force bool) error` — a refusal carries its blockers as `wkterr.Problem`s and reserves `Remedy` for actions; it refuses while any blocker exists; with `force`, renames the whole tree into `staging/` first, then removes from there. Recovers a task whose tree is already missing or half-staged, so an interrupted removal can be finished rather than being stuck forever.
 
 **Traps:**
 
@@ -3610,6 +3840,7 @@ git commit -m "feat: two-phase task create with full rollback"
 package task
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3618,6 +3849,7 @@ import (
 
 	"wkt/internal/discover"
 	"wkt/internal/state"
+	"wkt/internal/wkterr"
 )
 
 func TestRemoveRefusesOnIgnoredButPreciousFile(t *testing.T) {
@@ -4581,6 +4813,109 @@ func TestPreflightFailsClosedWhenTheSubmoduleCheckFails(t *testing.T) {
 		t.Fatal("a failed submodule check must block removal")
 	}
 }
+
+// TestRefusalSeparatesProblemsFromRemedy covers adversarial finding F5. The
+// refusal used to pack every blocker into the "remedy" field as
+// "CODE repo path detail", so the field meant to say what to do listed what
+// was wrong, with an empty path and raw git output inside it.
+func TestRefusalSeparatesProblemsFromRemedy(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-shape", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := task.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, ".gitignore"), []byte("dist/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, wt, "add", ".gitignore")
+	g(t, wt, "commit", "-qm", "ignore dist")
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wt, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "dist", "out.js"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Remove(c, "feat-shape", false)
+	if err == nil {
+		t.Fatal("a dirty tree must refuse")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) {
+		t.Fatalf("want a typed error, got %v", err)
+	}
+	if len(e.Problems) == 0 {
+		t.Fatal("the refusal must carry its blockers as problems")
+	}
+	var sawDirty, sawIgnored bool
+	for _, p := range e.Problems {
+		switch p.Code {
+		case "WKT_DIRTY":
+			sawDirty = true
+			if p.Repo == "" || p.Path == "" {
+				t.Fatalf("a blocker must name its repository and path: %+v", p)
+			}
+			if p.Info {
+				t.Fatal("uncommitted work blocks")
+			}
+			// The detail used to be one raw line of git status --porcelain,
+			// which both leaks git's format and hides every path after the
+			// first. Prose, yes — but prose that still names the paths: an
+			// empty detail passes a "not porcelain" check while saying
+			// nothing at all.
+			if p.Detail == "" {
+				t.Fatal("the dirty blocker must say what changed")
+			}
+			if strings.HasPrefix(p.Detail, " M") || strings.HasPrefix(p.Detail, "??") {
+				t.Fatalf("detail must be prose, not porcelain: %q", p.Detail)
+			}
+			if !strings.Contains(p.Detail, "f.txt") {
+				t.Fatalf("the modified path must appear in the detail: %q", p.Detail)
+			}
+		case "WKT_REGENERABLE_IGNORED":
+			sawIgnored = true
+			if !p.Info {
+				t.Fatal("regenerable ignored content is listed, never blocking")
+			}
+		}
+	}
+	if !sawDirty || !sawIgnored {
+		t.Fatalf("want both the dirty blocker and the informational one, got %+v", e.Problems)
+	}
+	if len(e.Remedy) == 0 {
+		t.Fatal("a refusal must say what to do")
+	}
+	for _, r := range e.Remedy {
+		if strings.Contains(r, "WKT_") {
+			t.Fatalf("remedy must hold actions, not problem codes: %q", r)
+		}
+	}
+}
+
+// TestDescribePorcelainKeepsThePaths pins the helper directly. Its first
+// version ran TrimSpace over the whole blob, which shifted " M f" left by one
+// column and silently produced "1 changed: .txt" — a detail that reads fine
+// and names a file that does not exist.
+func TestDescribePorcelainKeepsThePaths(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{" M f.txt\n", "1 changed: f.txt"},
+		{"M f.txt\n", "1 changed: f.txt"}, // gitx.Run trims, so the first line loses its leading space
+		{"?? new.txt\n", "1 changed: new.txt"},
+		{"M  staged.txt\n", "1 changed: staged.txt"},
+		{"R  old.txt -> new.txt\n", "1 changed: new.txt"},
+		{" M a\n?? b\n", "2 changed: a, b"},
+		{" M a\n M b\n M c\n M d\n", "4 changed, including a, b, c"},
+		{"", ""},
+	} {
+		if got := describePorcelain(tc.in); got != tc.want {
+			t.Errorf("describePorcelain(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -4604,6 +4939,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -4709,7 +5045,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		if s, err := gitx.Run(wt, "status", "--porcelain"); err != nil {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt})
 		} else if s != "" {
-			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: firstLine(s)})
+			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: describePorcelain(s)})
 		}
 		// 3: ignored content. git's own refusal never fires on any of it (H1).
 		// A bulk-ignored directory collapses to one "!! dir/" line — its
@@ -4763,7 +5099,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		}
 		if n, err := gitx.Run(wt, args...); err == nil {
 			if n != "" && n != "0" {
-				out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: n + " commit(s)"})
+				out = append(out, Blocker{Code: "WKT_UNPUSHED", Repo: r.RelPath, Detail: plural(n, "commit")})
 			}
 		} else {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "unpushed-commit check"})
@@ -4774,7 +5110,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		// fires even when the addition is fully committed and status is clean.
 		if sm, err := gitx.Run(wt, "submodule", "status", "--recursive"); err == nil {
 			if strings.TrimSpace(sm) != "" {
-				out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: firstLine(sm)})
+				out = append(out, Blocker{Code: "WKT_SUBMODULE", Repo: r.RelPath, Detail: "submodule " + submodulePath(sm)})
 			}
 		} else {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt, Detail: "submodule check"})
@@ -5032,15 +5368,15 @@ func Remove(c container.C, name string, force bool) error {
 		e := wkterr.New("WKT_WOULD_LOSE_WORK", "removal would lose work")
 		// List every entry, blocking and informational alike, so --force
 		// doesn't become reflexive: the user sees that most of what's in the
-		// way is build output, and one line is their .env (spec §5.7).
+		// way is build output, and one line is their .env (spec §5.7). They
+		// go in Problems; Remedy is reserved for what to actually do.
 		for _, b := range all {
-			line := b.Code
-			if b.Severity == "info" {
-				line = "(not blocking) " + line
-			}
-			e = e.WithRemedy(line + " " + b.Repo + " " + b.Path + " " + b.Detail)
+			e = e.WithProblem(wkterr.Problem{
+				Code: b.Code, Repo: b.Repo, Path: b.Path,
+				Detail: b.Detail, Info: b.Severity == "info",
+			})
 		}
-		return e
+		return e.WithRemedy(remedyFor(blocking, name)...)
 	}
 
 	if err := os.MkdirAll(c.StagingDir(), 0o700); err != nil {
@@ -5096,12 +5432,97 @@ func finishRemove(c container.C, t state.Task, name, staged string) error {
 	}
 	return nil
 }
+
+// describePorcelain turns "git status --porcelain" output into one line of
+// prose. Reporting only its first line both leaked git's format and hid
+// every path after the first.
+func describePorcelain(s string) string {
+	// Never slice at a fixed column. Porcelain's status is two columns
+	// (" M f.txt"), but gitx.Run returns trimmed stdout, so the *first*
+	// line arrives with its leading space already gone ("M f.txt") while
+	// the rest keep theirs. Splitting on the first space after the status
+	// handles both; slicing at [3:] silently ate a character of the first
+	// path and reported a file that does not exist.
+	var paths []string
+	for _, l := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		f := strings.SplitN(strings.TrimLeft(l, " "), " ", 2)
+		if len(f) != 2 {
+			continue
+		}
+		p := strings.TrimSpace(f[1])
+		if i := strings.Index(p, " -> "); i >= 0 {
+			p = p[i+len(" -> "):] // a rename: report where it landed
+		}
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return ""
+	}
+	if len(paths) <= 3 {
+		return strconv.Itoa(len(paths)) + " changed: " + strings.Join(paths, ", ")
+	}
+	return strconv.Itoa(len(paths)) + " changed, including " + strings.Join(paths[:3], ", ")
+}
+
+// remedyFor answers the only question a refusal leaves open: what now. It
+// names the action each *blocking* code needs, deduplicated and in a stable
+// order, and never repeats the problem list back at the user.
+func remedyFor(blocking []Blocker, name string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	forceable := true
+	for _, b := range blocking {
+		switch b.Code {
+		case "WKT_DIRTY", "WKT_UNTRACKED_TREE_CONTENT":
+			add("commit or stash the changes, or move them out of the tree")
+		case "WKT_UNPUSHED":
+			add("push the commits, or keep the task")
+		case "WKT_PRECIOUS_IGNORED":
+			add("copy the ignored files you need out of the tree")
+		case "WKT_IN_PROGRESS":
+			add("finish or abort the in-progress git operation")
+		case "WKT_SUBMODULE":
+			add("push the submodule's commits, then git submodule deinit it")
+			forceable = false
+		case "WKT_FOREIGN_REPO":
+			add("move the repository out of the tree: its history exists nowhere else")
+			forceable = false
+		case "WKT_COPY_DIVERGED", "WKT_LINK_SLOT_CHANGED", "WKT_LINK_SLOT_MISSING":
+			add("reconcile the changed file against the workspace copy")
+		case "WKT_CHECK_FAILED":
+			add("re-run once the repository is readable: a check that cannot run is treated as work at risk")
+			forceable = false
+		case "WKT_WORKTREE_MISSING":
+			add("the worktree is gone from disk; wkt rm --force finishes the removal")
+		}
+	}
+	if forceable {
+		add("or wkt rm " + name + " --force once you are sure nothing above matters")
+	}
+	return out
+}
+
+// plural keeps counted details reading like prose rather than like a log line.
+func plural(n, noun string) string {
+	if n == "1" {
+		return n + " " + noun
+	}
+	return n + " " + noun + "s"
+}
 ```
 
 - [ ] **Step 5: Run the tests**
 
 Run: `go test ./internal/task/ -v`
-Expected: all thirty-three tests in the package PASS — the ten from task 8 and the twenty-three here.
+Expected: all thirty-five tests in the package PASS — the ten from task 8 and the twenty-five here.
 
 - [ ] **Step 6: Commit**
 
@@ -5123,6 +5544,7 @@ git commit -m "feat: refuse-only teardown with staging fence"
 - Consumes: everything above.
 - Produces:
   - `cli.Run(args []string, stdout, stderr io.Writer) int` — the exit code contract: 0 consistent, 2 usage or task exists, 3 drift, 4 container missing, 1 any other typed failure.
+  - `wkt init --exclude a/inner,...` — spec §5.3 rule 6's escape hatch for a genuine nested repository. Exclusions are cumulative across runs (this run's flag plus what an earlier one recorded in `state/container.json`), and excluding a path that is not nested fails rather than passing silently.
   - Documented aliases `create` → `new` and `cleanup` → `rm`, because the acceptance battery drives those verbs (spec §7.1).
   - `new` warns on stderr, before creating anything, when a selected repository carries a submodule (spec §5.7) — `rm` refuses on one even with `--force`, so the task would otherwise be unremovable by any wkt command.
 
@@ -5878,6 +6300,80 @@ func TestNewWarnsOnStderrWhenASelectedRepositoryHasASubmodule(t *testing.T) {
 		t.Fatalf("new must warn on stderr that super carries a submodule, got %q", errb.String())
 	}
 }
+
+// TestInitExcludeAdoptsAWorkspaceWithANestedRepository covers adversarial
+// finding F4. Spec §5.3 rule 6 and the §7.1 command table both promise
+// --exclude as the escape hatch for a genuine nested repository; without it,
+// init refuses and a workspace containing one cannot be adopted at all.
+func TestInitExcludeAdoptsAWorkspaceWithANestedRepository(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "a", "inner"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("a genuine nested repository must be refused without --exclude")
+	}
+	if !strings.Contains(errb.String(), "WKT_NESTED_REPO") {
+		t.Fatalf("want WKT_NESTED_REPO, got %s", errb.String())
+	}
+	// The refusal has to name the way out, or the user is stuck.
+	if !strings.Contains(errb.String(), "--exclude") {
+		t.Fatalf("the refusal must point at --exclude: %s", errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"init", "--exclude", "a/inner", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("--exclude must adopt the workspace, exited %d: %s", code, errb.String())
+	}
+
+	// Recorded in container state: a later run must not need the flag again.
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the exclusion must be remembered, exited %d: %s", code, errb.String())
+	}
+
+	// And the workspace is usable: a task over the outer repository works.
+	out.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+}
+
+// TestInitExcludeRefusesAPathThatIsNotANestedRepository keeps the flag from
+// becoming a silent no-op for a typo, the same failure shape as defect 24.
+func TestInitExcludeRefusesAPathThatIsNotANestedRepository(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "a", "inner"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--exclude", "a/typo", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("excluding something that is not a nested repository must fail")
+	}
+	if !strings.Contains(errb.String(), "WKT_NO_SUCH_NESTED_REPO") {
+		t.Fatalf("want WKT_NO_SUCH_NESTED_REPO, got %s", errb.String())
+	}
+	// Excluding the *outer* repository is not what the flag is for either:
+	// it is not nested, and dropping it would leave its directory to be
+	// linked whole, hiding a repository inside a shared writable link.
+	errb.Reset()
+	if code := Run([]string{"init", "--exclude", "a", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("excluding a non-nested repository must fail")
+	}
+}
+
+// TestUsageDocumentsExclude keeps the escape hatch discoverable: a flag the
+// refusal recommends but the usage never mentions is a flag nobody finds.
+func TestUsageDocumentsExclude(t *testing.T) {
+	if !strings.Contains(usage, "--exclude") {
+		t.Fatalf("usage must document --exclude:\n%s", usage)
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -5902,6 +6398,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"wkt/internal/container"
@@ -5914,7 +6411,7 @@ import (
 
 const usage = `wkt — one task, one branch, many repositories
 
-  wkt init   [--workspace DIR] [--dry-run]
+  wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
@@ -5945,6 +6442,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	all := fs.Bool("all", false, "select every discovered repository")
 	force := fs.Bool("force", false, "remove even though work would be lost")
 	dryRun := fs.Bool("dry-run", false, "report without writing anything")
+	exclude := fs.String("exclude", "", "comma-separated nested repositories to exclude from adoption")
 
 	// The task name may fall anywhere among the flags: before all of them,
 	// after all of them, or split between two of them ("new --workspace WS
@@ -5992,12 +6490,53 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		if pairs := discover.NestedPairs(entries); len(pairs) > 0 {
-			e := wkterr.New("WKT_NESTED_REPO", "nested repositories are not supported")
-			for _, p := range pairs {
-				e = e.WithRemedy(p[0] + " is inside " + p[1])
+		// Exclusions are cumulative: what this run passes, plus whatever an
+		// earlier run recorded (spec §5.3 rule 6, "recorded in container
+		// state"). Without the recorded half, a workspace adopted once with
+		// --exclude would refuse on every later init.
+		prior, err := state.LoadContainer(c.ConfigDir())
+		if err != nil {
+			return fail(stderr, err)
+		}
+		excluded := map[string]bool{}
+		for _, p := range prior.Excluded {
+			excluded[p] = true
+		}
+		pairs := discover.NestedPairs(entries)
+		for _, p := range splitList(*exclude) {
+			nested := false
+			for _, pair := range pairs {
+				if pair[0] == p {
+					nested = true
+					break
+				}
 			}
-			return fail(stderr, e)
+			if !nested {
+				// A typo, or an attempt to drop an ordinary repository —
+				// which is not what this flag is for: an unexcluded
+				// top-level repository still has to be discovered, or its
+				// directory would be linked whole and share a repository
+				// writably with every task (spec §5.3 rule 4).
+				return fail(stderr, wkterr.New("WKT_NO_SUCH_NESTED_REPO", "not a nested repository in this workspace").
+					WithRepo(p).
+					WithRemedy("run wkt init to see which repositories are nested"))
+			}
+			excluded[p] = true
+		}
+		var stillNested [][2]string
+		for _, p := range pairs {
+			if !excluded[p[0]] {
+				stillNested = append(stillNested, p)
+			}
+		}
+		if len(stillNested) > 0 {
+			e := wkterr.New("WKT_NESTED_REPO", "nested repositories are not supported")
+			for _, p := range stillNested {
+				e = e.WithProblem(wkterr.Problem{Code: "WKT_NESTED_REPO", Repo: p[0], Detail: "inside " + p[1]})
+			}
+			return fail(stderr, e.WithRemedy(
+				"move the inner repository out of the outer one",
+				"or adopt the workspace without it: wkt init --exclude "+stillNested[0][0]))
 		}
 		repoCount := 0
 		for _, e := range entries {
@@ -6015,6 +6554,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		if err := container.Create(c); err != nil {
+			return fail(stderr, err)
+		}
+		if err := recordExclusions(c, excluded); err != nil {
 			return fail(stderr, err)
 		}
 		return 0
@@ -6263,6 +6805,32 @@ func fail(stderr io.Writer, err error) int {
 	}
 	return 1
 }
+
+// splitList parses a comma-separated flag value, ignoring empty fields so a
+// trailing comma is not read as a repository named "".
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// recordExclusions persists init's --exclude decisions in a stable order, so
+// a later init honours them without the flag being repeated.
+func recordExclusions(c container.C, excluded map[string]bool) error {
+	if len(excluded) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(excluded))
+	for p := range excluded {
+		list = append(list, p)
+	}
+	sort.Strings(list)
+	return state.SaveContainer(c.ConfigDir(), state.Container{Excluded: list})
+}
 ```
 
 - [ ] **Step 4: Write the entry point**
@@ -6311,6 +6879,7 @@ git commit -m "feat: CLI wiring for init, new, path, status and rm"
 - Create: `test/07_store_origin.sh`
 - Create: `test/08_backfill.sh`
 - Create: `test/09_exit_codes.sh`
+- Create: `test/10_exclude_nested.sh`
 - Create: `test/20m_two_tasks_one_repo.sh`
 - Create: `test/run.sh`
 
@@ -6545,7 +7114,9 @@ summary 20m
 Test 04 pins the precious-ignored refusal on its own, with no unpushed commit
 beside it. Test 05 observes the staging fence. Test 08 is the only scenario that
 does **not** pass `--all`, so it is the only one that exercises the back-fill.
-Test 09 drives the exit-code contract end to end.
+Test 09 drives the exit-code contract end to end. Test 10 drives the nested-repo
+refusal and its escape hatch, including that the exclusion survives a later
+`init` — a decision recorded in state is worthless if the next run ignores it.
 
 ```bash
 # test/04_precious_ignored_only.sh
@@ -6673,6 +7244,42 @@ echo "change" >> "$TD/svc-a/src/index.js"
 wt status task-9 >/dev/null 2>&1
 assert_eq "status: exit 3 when the task has drifted" "$?" "3"
 summary 09
+```
+
+```bash
+# test/10_exclude_nested.sh
+#!/usr/bin/env bash
+# Spec §5.3 rule 6: a genuine nested repository is refused by name, with
+# --exclude as the escape hatch, "recorded in container state" — so a later
+# init must honour it without the flag being repeated.
+. "$(dirname "$0")/lib.sh"
+wt_init_env; trap wt_cleanup_env EXIT
+mk_repo services/svc-a || exit 1
+mk_repo services/svc-a/vendored || exit 1
+
+wt init >"$TMP/out" 2>"$TMP/err"
+assert_eq "init refuses a nested repository" "$?" "1"
+if grep -q "WKT_NESTED_REPO" "$TMP/err"; then pass "the refusal names the code"
+else fail "the refusal names the code — got $(cat "$TMP/err")"; fi
+if grep -q -- "--exclude" "$TMP/err"; then pass "the refusal points at the escape hatch"
+else fail "the refusal points at the escape hatch"; fi
+
+wt init --exclude services/svc-a/vendored >/dev/null 2>&1
+assert_eq "init --exclude adopts the workspace" "$?" "0"
+assert_file "the exclusion is recorded in container state" "$WS.worktrees/state/container.json"
+
+wt init >/dev/null 2>&1
+assert_eq "a later init honours the recorded exclusion" "$?" "0"
+
+wt new t1 --all >/dev/null 2>&1
+assert_eq "a task over the outer repository works" "$?" "0"
+
+wt init --exclude services/typo >"$TMP/out2" 2>"$TMP/err2"
+assert_eq "excluding a path that is not nested fails" "$?" "1"
+if grep -q "WKT_NO_SUCH_NESTED_REPO" "$TMP/err2"; then pass "the typo is named"
+else fail "the typo is named — got $(cat "$TMP/err2")"; fi
+
+summary 10
 ```
 
 - [ ] **Step 6: Write the runner and run the whole battery**
