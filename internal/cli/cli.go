@@ -272,8 +272,18 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				return fail(stderr, err)
 			}
 			fmt.Fprintf(stdout, "%s  base epoch %s\n", t.Name, t.BaseEpoch.Format("2006-01-02 15:04:05Z"))
+			// Size the column to the widest path present rather than a fixed
+			// 28: real workspaces carry paths like
+			// "DVS/Research/excalidraw-diagram-skill", which overran it and
+			// pushed the branch column out of line (live-run finding L3).
+			width := 0
 			for _, r := range t.Repos {
-				fmt.Fprintf(stdout, "  %-28s %s\n", r.RelPath, r.Branch)
+				if len(r.RelPath) > width {
+					width = len(r.RelPath)
+				}
+			}
+			for _, r := range t.Repos {
+				fmt.Fprintf(stdout, "  %-*s %s\n", width, r.RelPath, r.Branch)
 			}
 			for _, b := range blockers {
 				// Only blocking-severity entries are drift. Info-severity

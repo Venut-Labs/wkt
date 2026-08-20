@@ -397,3 +397,54 @@ func TestSymlinkedWorkspaceEntryRoutesToALinkSlotNotACopy(t *testing.T) {
 		t.Fatalf("the symlink chain must resolve to the real content: %v", err)
 	}
 }
+
+// TestOSArtifactsAreNotCopiedIntoTheTree covers live-run finding L2. On a
+// real macOS workspace every directory Finder has opened holds a .DS_Store,
+// and copying it into the tree creates a copy slot whose hash diverges the
+// moment Finder opens the *tree* — which blocked removal on a file nobody
+// created on purpose.
+func TestOSArtifactsAreNotCopiedIntoTheTree(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		".DS_Store":      "finder junk",
+		"Thumbs.db":      "explorer junk",
+		"CONVENTIONS.md": "real content",
+	} {
+		if err := os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := PlanFor(ws, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(p.CopyFiles, "CONVENTIONS.md") {
+		t.Fatalf("a real loose file must still be copied: %+v", p.CopyFiles)
+	}
+	for _, junk := range []string{".DS_Store", "Thumbs.db"} {
+		if contains(p.CopyFiles, junk) {
+			t.Fatalf("%s must not become a copy slot: %+v", junk, p.CopyFiles)
+		}
+	}
+
+	treeRoot := filepath.Join(base, "tree")
+	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slots, err := Materialise(treeRoot, ws, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range slots {
+		if s.RelPath == ".DS_Store" {
+			t.Fatal("no slot may be recorded for an OS artifact")
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(treeRoot, ".DS_Store")); !os.IsNotExist(err) {
+		t.Fatal("the tree must not carry a copied .DS_Store")
+	}
+}

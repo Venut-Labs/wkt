@@ -2228,15 +2228,18 @@ git commit -m "feat: store construction with base pin, de-borrow and two remotes
 ### Task 7: Tree materialisation — mirrored shape, back-fill, loose files
 
 **Files:**
+- Create: `internal/artifact/artifact.go`
 - Create: `internal/tree/tree.go`
+- Test: `internal/artifact/artifact_test.go`
 - Test: `internal/tree/tree_test.go`
 
 **Interfaces:**
-- Consumes: `discover`, `paths`, `state`, `wkterr`.
+- Consumes: `artifact`, `discover`, `paths`, `state`, `wkterr`.
 - Produces:
   - `tree.Plan{Materialise []string; BackFill []string; LinkDirs []string; CopyFiles []string}`.
   - `tree.PlanFor(workspace string, entries []discover.Entry, selected []string) (Plan, error)` — walks the **whole** workspace, not just its immediate children, so content sitting beside a nested repository inside an ancestor directory still reaches the tree.
   - `tree.Hash(path string) (string, error)` — the content hash recorded for a copied loose file, and re-checked at teardown.
+  - `artifact.IsRegenerable(relPath string) bool` — build output and operating-system artifacts. It lives in its own package because **both** the tree and the teardown must give the same answer: while the classifier sat inside the teardown it applied to gitignored content inside a repository and nowhere else, and a `.DS_Store` at the tree root — which Finder writes the moment anyone opens the folder — blocked removal anyway.
   - `tree.Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error)` — refuses to link any directory whose target contains a repository at any depth (spec §5.3 rule 4, unbounded, symlinks not followed); creates ancestor directories for real, back-fills un-materialised repositories as **absolute** symlinks at their mirrored positions, symlinks non-git directories, copies loose files (preserving their mode, so an executable script stays executable) and records their hashes. Ancestor directories are derived from **every** repository in the plan, back-filled ones included; deriving them from the materialised set alone makes a back-filled repository's group directory a real directory and the symlink beside it fail.
 
 **Traps:**
@@ -2658,6 +2661,57 @@ func TestSymlinkedWorkspaceEntryRoutesToALinkSlotNotACopy(t *testing.T) {
 		t.Fatalf("the symlink chain must resolve to the real content: %v", err)
 	}
 }
+
+// TestOSArtifactsAreNotCopiedIntoTheTree covers live-run finding L2. On a
+// real macOS workspace every directory Finder has opened holds a .DS_Store,
+// and copying it into the tree creates a copy slot whose hash diverges the
+// moment Finder opens the *tree* — which blocked removal on a file nobody
+// created on purpose.
+func TestOSArtifactsAreNotCopiedIntoTheTree(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		".DS_Store":      "finder junk",
+		"Thumbs.db":      "explorer junk",
+		"CONVENTIONS.md": "real content",
+	} {
+		if err := os.WriteFile(filepath.Join(ws, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := PlanFor(ws, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(p.CopyFiles, "CONVENTIONS.md") {
+		t.Fatalf("a real loose file must still be copied: %+v", p.CopyFiles)
+	}
+	for _, junk := range []string{".DS_Store", "Thumbs.db"} {
+		if contains(p.CopyFiles, junk) {
+			t.Fatalf("%s must not become a copy slot: %+v", junk, p.CopyFiles)
+		}
+	}
+
+	treeRoot := filepath.Join(base, "tree")
+	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slots, err := Materialise(treeRoot, ws, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range slots {
+		if s.RelPath == ".DS_Store" {
+			t.Fatal("no slot may be recorded for an OS artifact")
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(treeRoot, ".DS_Store")); !os.IsNotExist(err) {
+		t.Fatal("the tree must not carry a copied .DS_Store")
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2684,6 +2738,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"wkt/internal/artifact"
 	"wkt/internal/discover"
 	"wkt/internal/paths"
 	"wkt/internal/state"
@@ -2797,6 +2852,12 @@ func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *
 			return wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot inspect a workspace entry").WithPath(filepath.Join(abs, name))
 		case info.Mode()&os.ModeSymlink != 0, info.IsDir():
 			p.LinkDirs = append(p.LinkDirs, relSlash)
+		case artifact.IsRegenerable(relSlash):
+			// An OS artifact (.DS_Store and friends) carries no work and is
+			// rewritten by the file manager on its own. Copying it in makes
+			// a copy slot whose hash diverges the first time anyone opens
+			// the *tree* in Finder, which then blocked removal on a file
+			// nobody created on purpose (live-run finding L2).
 		default:
 			p.CopyFiles = append(p.CopyFiles, relSlash)
 		}
@@ -2957,10 +3018,109 @@ func Hash(path string) (string, error) {
 }
 ```
 
+```go
+// internal/artifact/artifact.go
+// Package artifact classifies paths that a build or the operating system
+// recreates on its own. Both halves of wkt need the same answer: the tree
+// must not copy such a file into a task, and the teardown must not refuse
+// on one — a classifier that lives in only one of them leaves the other
+// treating a .DS_Store as work at risk.
+package artifact
+
+import "strings"
+
+var regenerable = [][]string{
+	{"node_modules"}, {"dist"}, {"build"}, {"target"},
+	{".venv"}, {"venv"}, {".next"}, {".nuxt"},
+	{"__pycache__"}, {".pytest_cache"}, {"coverage"},
+	{".gradle"}, {".tox"}, {"vendor", "bundle"}, {".terraform"},
+	// Operating-system artifacts: recreated automatically by the OS/file
+	// manager and never carry any work of their own. Without these, a
+	// gitignored ".DS_Store" (which Finder writes into essentially every
+	// directory a macOS user has so much as opened, and which nearly every
+	// macOS repository gitignores) would make "wkt rm" refuse on almost
+	// every real tree on the primary development platform — teaching
+	// people to reach for --force without reading the list, which defeats
+	// the reason this check exists at all, including for the "server.key"
+	// case it was just fixed to catch.
+	{".DS_Store"}, {"Thumbs.db"}, {".Spotlight-V100"}, {".fseventsd"},
+	{".Trashes"}, {"desktop.ini"},
+}
+
+// IsRegenerable reports whether a workspace-relative path is build output or
+// an operating-system artifact.
+func IsRegenerable(relPath string) bool {
+	comps := strings.Split(strings.TrimSuffix(relPath, "/"), "/")
+	for _, seq := range regenerable {
+		if containsComponentSequence(comps, seq) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsComponentSequence(comps, seq []string) bool {
+	if len(seq) > len(comps) {
+		return false
+	}
+	for i := 0; i+len(seq) <= len(comps); i++ {
+		match := true
+		for j, s := range seq {
+			if comps[i+j] != s {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+```
+
+```go
+// internal/artifact/artifact_test.go
+package artifact
+
+import "testing"
+
+// TestIsRegenerable pins the classifier the tree and the teardown share.
+// Live-run finding L2: the list lived inside the teardown, so it applied to
+// gitignored content inside a repository and nowhere else — and a .DS_Store
+// at the tree root, which Finder writes the moment a macOS user opens the
+// folder, blocked removal anyway.
+func TestIsRegenerable(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{".DS_Store", true},
+		{"nested/dir/.DS_Store", true},
+		{"Thumbs.db", true},
+		{"node_modules/left-pad/index.js", true},
+		{"dist/", true},
+		{"services/svc-a/dist/app.js", true},
+		{"vendor/bundle/gems", true},
+		{".env", false},
+		{"server.key", false},
+		{"src/main.go", false},
+		{"notes.md", false},
+		// A file that merely mentions a regenerable name is not one.
+		{"docs/node_modules-explained.md", false},
+		{"dist-plan.txt", false},
+	} {
+		if got := IsRegenerable(tc.path); got != tc.want {
+			t.Errorf("IsRegenerable(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+```
+
 - [ ] **Step 4: Run the tests**
 
-Run: `go test ./internal/tree/ -v`
-Expected: all eight tests PASS. The first is the differentiator guard — mirroring is worthless without back-fill.
+Run: `go test ./internal/artifact/ ./internal/tree/ -v`
+Expected: all ten tests PASS. The first is the differentiator guard — mirroring is worthless without back-fill.
 
 - [ ] **Step 5: Commit**
 
@@ -3808,7 +3968,7 @@ git commit -m "feat: two-phase task create with full rollback"
 - Test: `internal/task/remove_test.go`
 
 **Interfaces:**
-- Consumes: `container`, `gitx`, `paths`, `state`, `tree`, `wkterr`.
+- Consumes: `artifact`, `container`, `gitx`, `paths`, `state`, `tree`, `wkterr`.
 - Produces:
   - `task.Blocker{Code, Repo, Path, Detail, Severity string}` — `Severity` is `""` (blocking) or `"info"` (reported, never blocking), so regenerable ignored content can be listed without refusing on it.
   - `task.Preflight(c container.C, t state.Task) ([]Blocker, error)` — enumerates from the filesystem, never from state; walks real directories only and never descends link slots.
@@ -4916,6 +5076,54 @@ func TestDescribePorcelainKeepsThePaths(t *testing.T) {
 		}
 	}
 }
+
+// TestOSArtifactAtTheTreeRootDoesNotBlockRemoval covers live-run finding L2
+// at the teardown end: opening a task tree in Finder writes .DS_Store into
+// the tree root, which the untracked-tree-content check treated as work at
+// risk — so on macOS an ordinary look at the folder made the task
+// undeletable without --force.
+func TestOSArtifactAtTheTreeRootDoesNotBlockRemoval(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-finder", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	root := c.TreePath("feat-finder")
+	if err := os.WriteFile(filepath.Join(root, ".DS_Store"), []byte("finder junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t2, err := state.Load(c.StateDir(), "feat-finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockers, err := Preflight(c, t2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range blockers {
+		if b.Path != "" && strings.HasSuffix(b.Path, ".DS_Store") && b.Severity != "info" {
+			t.Fatalf(".DS_Store must be listed, never blocking: %+v", b)
+		}
+	}
+	if err := Remove(c, "feat-finder", false); err != nil {
+		t.Fatalf("a tree whose only extra content is an OS artifact must remove cleanly: %v", err)
+	}
+}
+
+// TestRealUntrackedContentAtTheTreeRootStillBlocks is the other half: the
+// exemption is for artifacts, not for anything at the tree root.
+func TestRealUntrackedContentAtTheTreeRootStillBlocks(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-notes", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.TreePath("feat-notes"), "notes.md"), []byte("real work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-notes", false); err == nil {
+		t.Fatal("untracked content at the tree root must still block removal")
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -4943,6 +5151,7 @@ import (
 	"strings"
 	"syscall"
 
+	"wkt/internal/artifact"
 	"wkt/internal/container"
 	"wkt/internal/gitx"
 	"wkt/internal/paths"
@@ -4972,23 +5181,6 @@ type Blocker struct {
 // with zero blockers and no --force. Now unknown ignored content blocks by
 // default; only what's provably regenerable is exempt, and even that is
 // still reported, not silently passed over (see the "info" Severity below).
-var regenerable = [][]string{
-	{"node_modules"}, {"dist"}, {"build"}, {"target"},
-	{".venv"}, {"venv"}, {".next"}, {".nuxt"},
-	{"__pycache__"}, {".pytest_cache"}, {"coverage"},
-	{".gradle"}, {".tox"}, {"vendor", "bundle"}, {".terraform"},
-	// Operating-system artifacts: recreated automatically by the OS/file
-	// manager and never carry any work of their own. Without these, a
-	// gitignored ".DS_Store" (which Finder writes into essentially every
-	// directory a macOS user has so much as opened, and which nearly every
-	// macOS repository gitignores) would make "wkt rm" refuse on almost
-	// every real tree on the primary development platform — teaching
-	// people to reach for --force without reading the list, which defeats
-	// the reason this check exists at all, including for the "server.key"
-	// case it was just fixed to catch.
-	{".DS_Store"}, {"Thumbs.db"}, {".Spotlight-V100"}, {".fseventsd"},
-	{".Trashes"}, {"desktop.ini"},
-}
 
 // isRegenerable reports whether relPath — git's own slash-separated,
 // repo-relative reporting of an ignored path — contains one of the
@@ -4996,34 +5188,6 @@ var regenerable = [][]string{
 // substring: "target" matches ".../target/..." but not
 // ".../my-target-cache/...", and a name like "server.key" never matches
 // anything here at all, which is the point.
-func isRegenerable(relPath string) bool {
-	comps := strings.Split(strings.TrimSuffix(relPath, "/"), "/")
-	for _, seq := range regenerable {
-		if containsComponentSequence(comps, seq) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsComponentSequence(comps, seq []string) bool {
-	if len(seq) > len(comps) {
-		return false
-	}
-	for i := 0; i+len(seq) <= len(comps); i++ {
-		match := true
-		for j, s := range seq {
-			if comps[i+j] != s {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
 
 // Preflight enumerates every reason removing t's tree would lose work. It
 // walks the real filesystem under the tree root — never the state file — so
@@ -5062,7 +5226,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 					continue
 				}
 				rel := strings.TrimPrefix(line, "!! ")
-				if isRegenerable(rel) {
+				if artifact.IsRegenerable(rel) {
 					out = append(out, Blocker{Code: "WKT_REGENERABLE_IGNORED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
@@ -5194,12 +5358,23 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 						// (section 8).
 						if wantHash, isCopy := copyHash[rel]; isCopy {
 							if sum, hErr := tree.Hash(p); hErr != nil || sum != wantHash {
-								out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
+								b := Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p}
+								if artifact.IsRegenerable(rel) {
+									b = Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: p, Severity: "info"}
+								}
+								out = append(out, b)
 							}
 						}
 					case ancestorOfSomething(rel):
 						// a real directory on the path to something recorded;
 						// fall through and keep descending.
+					case artifact.IsRegenerable(rel):
+						// Finder writes .DS_Store into every directory a
+						// macOS user opens, the task tree included. Listing
+						// it is right; blocking on it taught people to reach
+						// for --force without reading the list, which is the
+						// one thing this check cannot afford (finding L2).
+						out = append(out, Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: p, Severity: "info"})
 					default:
 						out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
 						if d.IsDir() {
@@ -5289,6 +5464,13 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 			}
 		case "copy":
 			if sum, err := tree.Hash(p); err != nil || sum != slot.Hash {
+				// A slot recorded by an older wkt may still name an OS
+				// artifact; today's tree never copies one. Either way it is
+				// not work at risk.
+				if artifact.IsRegenerable(slot.RelPath) {
+					out = append(out, Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: slot.RelPath, Severity: "info"})
+					continue
+				}
 				out = append(out, Blocker{Code: "WKT_COPY_DIVERGED", Path: slot.RelPath})
 			}
 		}
@@ -5522,7 +5704,7 @@ func plural(n, noun string) string {
 - [ ] **Step 5: Run the tests**
 
 Run: `go test ./internal/task/ -v`
-Expected: all thirty-five tests in the package PASS — the ten from task 8 and the twenty-five here.
+Expected: all thirty-seven tests in the package PASS — the ten from task 8 and the twenty-seven here.
 
 - [ ] **Step 6: Commit**
 
@@ -6374,6 +6556,47 @@ func TestUsageDocumentsExclude(t *testing.T) {
 		t.Fatalf("usage must document --exclude:\n%s", usage)
 	}
 }
+
+// TestStatusColumnsAlignWhateverThePathLength covers live-run finding L3: the
+// branch column was padded to a fixed 28 characters, so a real path like
+// "DVS/Research/excalidraw-diagram-skill" pushed it out of line.
+func TestStatusColumnsAlignWhateverThePathLength(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "group", "research", "excalidraw-diagram-skill"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("status exited %d: %s", code, errb.String())
+	}
+	col := -1
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "  !") || strings.HasPrefix(line, "  i") {
+			continue
+		}
+		at := strings.LastIndex(line, "t1")
+		if at < 0 {
+			continue
+		}
+		if col == -1 {
+			col = at
+		} else if at != col {
+			t.Fatalf("branch column must line up for every repository:\n%s", out.String())
+		}
+	}
+	if col == -1 {
+		t.Fatalf("status printed no repository lines:\n%s", out.String())
+	}
+}
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -6659,8 +6882,18 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				return fail(stderr, err)
 			}
 			fmt.Fprintf(stdout, "%s  base epoch %s\n", t.Name, t.BaseEpoch.Format("2006-01-02 15:04:05Z"))
+			// Size the column to the widest path present rather than a fixed
+			// 28: real workspaces carry paths like
+			// "DVS/Research/excalidraw-diagram-skill", which overran it and
+			// pushed the branch column out of line (live-run finding L3).
+			width := 0
 			for _, r := range t.Repos {
-				fmt.Fprintf(stdout, "  %-28s %s\n", r.RelPath, r.Branch)
+				if len(r.RelPath) > width {
+					width = len(r.RelPath)
+				}
+			}
+			for _, r := range t.Repos {
+				fmt.Fprintf(stdout, "  %-*s %s\n", width, r.RelPath, r.Branch)
 			}
 			for _, b := range blockers {
 				// Only blocking-severity entries are drift. Info-severity
@@ -6880,6 +7113,7 @@ git commit -m "feat: CLI wiring for init, new, path, status and rm"
 - Create: `test/08_backfill.sh`
 - Create: `test/09_exit_codes.sh`
 - Create: `test/10_exclude_nested.sh`
+- Create: `test/11_os_artifacts.sh`
 - Create: `test/20m_two_tasks_one_repo.sh`
 - Create: `test/run.sh`
 
@@ -7280,6 +7514,41 @@ if grep -q "WKT_NO_SUCH_NESTED_REPO" "$TMP/err2"; then pass "the typo is named"
 else fail "the typo is named — got $(cat "$TMP/err2")"; fi
 
 summary 10
+```
+
+```bash
+# test/11_os_artifacts.sh
+#!/usr/bin/env bash
+# Live-run finding L2: on macOS, Finder writes .DS_Store into every directory
+# a user opens — the task tree included. An artifact nobody created on purpose
+# must never make a task drift or need --force to remove.
+. "$(dirname "$0")/lib.sh"
+wt_init_env; trap wt_cleanup_env EXIT
+mk_repo services/svc-a || exit 1
+printf 'finder junk\n' > "$WS/.DS_Store"
+printf 'real content\n' > "$WS/NOTES.md"
+
+wt init >/dev/null 2>&1
+wt new task-11 --all >/dev/null 2>&1
+TD="$(wt_task_dir task-11)"
+
+assert_no_file "the workspace .DS_Store is not copied into the tree" "$TD/.DS_Store"
+assert_file    "a real loose file still is" "$TD/NOTES.md"
+
+# Finder now opens the tree itself.
+printf 'finder junk in the tree\n' > "$TD/.DS_Store"
+printf 'finder junk deeper\n' > "$TD/services/.DS_Store"
+
+wt status task-11 >"$TMP/status" 2>&1
+assert_eq "an OS artifact in the tree is not drift" "$?" "0"
+if grep -q "WKT_REGENERABLE_TREE_CONTENT" "$TMP/status"; then pass "it is still listed, marked informational"
+else fail "it is still listed — got $(cat "$TMP/status")"; fi
+
+wt rm task-11 >/dev/null 2>&1
+assert_eq "rm needs no --force for it" "$?" "0"
+assert_no_file "the tree is gone" "$TD"
+
+summary 11
 ```
 
 - [ ] **Step 6: Write the runner and run the whole battery**

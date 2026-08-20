@@ -130,3 +130,39 @@ asserted "not porcelain", which an empty string satisfies. Both the helper
 and the test were fixed, and the helper now has a table test of its own —
 the same lesson as defects 26 through 32 above, one round later.
 
+---
+
+# Findings from the first live run
+
+Run against a real multi-repo workspace (`PIPEOFF`: five repositories at
+depths 1–3, two of them 212M and 224M, working copies carrying up to 48
+uncommitted changes, two submodules, and directories full of slide PNGs).
+Everything created was removed afterwards; the workspace was left as found.
+
+## What held on real data
+
+- `init` took 0.044s and found **five** repositories where a `find -maxdepth 3`
+  saw two, and skipped the linked worktree inside another workspace.
+- `new` over two small repositories took 0.56s; over the 212M one, 3.7s — the
+  de-borrowed store repacked to 105M.
+- The base came from `origin/HEAD` even though the repository sat on
+  `fix/safety-import-barrier`, exactly as §5.5 requires.
+- Mirrored shape at depth 3, real ancestor directories, link slots for non-git
+  directories, back-fill symlinks for unselected repositories.
+- After `rm`: the workspace intact, every slide still there, base pins gone,
+  working copies untouched with their uncommitted changes still in place.
+
+## Defects found (fixed)
+
+| # | Defect | Fix |
+|---|---|---|
+| L2 | On macOS, Finder writes `.DS_Store` into every directory a user opens — the task tree included. That made `status` report drift (exit 3) and `rm` refuse without `--force`, on a file nobody created on purpose. Two paths hit it: untracked content at the tree root, and a diverged copy slot for the `.DS_Store` copied out of the workspace. The regenerable allowlist already knew `.DS_Store`, but it only applied to gitignored content *inside a repository*. | The classifier moved to `internal/artifact` so the tree and the teardown share one answer. The tree no longer copies OS artifacts at all, and the teardown lists them as `WKT_REGENERABLE_TREE_CONTENT`, informational, wherever they turn up. Battery scenario 11 reproduces the Finder case. |
+| L3 | `status` padded the branch column to a fixed 28 characters, so a real path like `DVS/Research/excalidraw-diagram-skill` pushed it out of line. | The column is sized to the widest path present. |
+
+## Findings recorded, not fixed
+
+| # | Finding | Why it matters |
+|---|---|---|
+| L1 | Loose files are copied with no size or count threshold. The probe tree carried 41 files and 3.3M, including 19 slide PNGs from an ancestor directory that no task would ever edit. A directory of datasets or video would be copied whole, per task. | §5.3 rule 5 copies loose files deliberately, but the case where an ancestor directory holds large binaries was never considered. Needs a threshold, a link-instead-of-copy rule, or an explicit statement that it is intended. |
+| L4 | A repository deeper than the discovery bound (4) makes its containing directory unlinkable, so `init` succeeds and `new` then refuses with `WKT_NESTED_REPO`. This is §5.3 rule 4 working as designed — the repository must not be shared writably — but the user learns about it one command too late. | `init` could run the same unbounded scan over what it is about to link and say so up front. |
+

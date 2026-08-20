@@ -806,3 +806,44 @@ func TestUsageDocumentsExclude(t *testing.T) {
 		t.Fatalf("usage must document --exclude:\n%s", usage)
 	}
 }
+
+// TestStatusColumnsAlignWhateverThePathLength covers live-run finding L3: the
+// branch column was padded to a fixed 28 characters, so a real path like
+// "DVS/Research/excalidraw-diagram-skill" pushed it out of line.
+func TestStatusColumnsAlignWhateverThePathLength(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "group", "research", "excalidraw-diagram-skill"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("status exited %d: %s", code, errb.String())
+	}
+	col := -1
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "  !") || strings.HasPrefix(line, "  i") {
+			continue
+		}
+		at := strings.LastIndex(line, "t1")
+		if at < 0 {
+			continue
+		}
+		if col == -1 {
+			col = at
+		} else if at != col {
+			t.Fatalf("branch column must line up for every repository:\n%s", out.String())
+		}
+	}
+	if col == -1 {
+		t.Fatalf("status printed no repository lines:\n%s", out.String())
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"wkt/internal/artifact"
 	"wkt/internal/container"
 	"wkt/internal/gitx"
 	"wkt/internal/paths"
@@ -43,23 +44,6 @@ type Blocker struct {
 // with zero blockers and no --force. Now unknown ignored content blocks by
 // default; only what's provably regenerable is exempt, and even that is
 // still reported, not silently passed over (see the "info" Severity below).
-var regenerable = [][]string{
-	{"node_modules"}, {"dist"}, {"build"}, {"target"},
-	{".venv"}, {"venv"}, {".next"}, {".nuxt"},
-	{"__pycache__"}, {".pytest_cache"}, {"coverage"},
-	{".gradle"}, {".tox"}, {"vendor", "bundle"}, {".terraform"},
-	// Operating-system artifacts: recreated automatically by the OS/file
-	// manager and never carry any work of their own. Without these, a
-	// gitignored ".DS_Store" (which Finder writes into essentially every
-	// directory a macOS user has so much as opened, and which nearly every
-	// macOS repository gitignores) would make "wkt rm" refuse on almost
-	// every real tree on the primary development platform — teaching
-	// people to reach for --force without reading the list, which defeats
-	// the reason this check exists at all, including for the "server.key"
-	// case it was just fixed to catch.
-	{".DS_Store"}, {"Thumbs.db"}, {".Spotlight-V100"}, {".fseventsd"},
-	{".Trashes"}, {"desktop.ini"},
-}
 
 // isRegenerable reports whether relPath — git's own slash-separated,
 // repo-relative reporting of an ignored path — contains one of the
@@ -67,34 +51,6 @@ var regenerable = [][]string{
 // substring: "target" matches ".../target/..." but not
 // ".../my-target-cache/...", and a name like "server.key" never matches
 // anything here at all, which is the point.
-func isRegenerable(relPath string) bool {
-	comps := strings.Split(strings.TrimSuffix(relPath, "/"), "/")
-	for _, seq := range regenerable {
-		if containsComponentSequence(comps, seq) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsComponentSequence(comps, seq []string) bool {
-	if len(seq) > len(comps) {
-		return false
-	}
-	for i := 0; i+len(seq) <= len(comps); i++ {
-		match := true
-		for j, s := range seq {
-			if comps[i+j] != s {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
 
 // Preflight enumerates every reason removing t's tree would lose work. It
 // walks the real filesystem under the tree root — never the state file — so
@@ -133,7 +89,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 					continue
 				}
 				rel := strings.TrimPrefix(line, "!! ")
-				if isRegenerable(rel) {
+				if artifact.IsRegenerable(rel) {
 					out = append(out, Blocker{Code: "WKT_REGENERABLE_IGNORED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
@@ -265,12 +221,23 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 						// (section 8).
 						if wantHash, isCopy := copyHash[rel]; isCopy {
 							if sum, hErr := tree.Hash(p); hErr != nil || sum != wantHash {
-								out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
+								b := Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p}
+								if artifact.IsRegenerable(rel) {
+									b = Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: p, Severity: "info"}
+								}
+								out = append(out, b)
 							}
 						}
 					case ancestorOfSomething(rel):
 						// a real directory on the path to something recorded;
 						// fall through and keep descending.
+					case artifact.IsRegenerable(rel):
+						// Finder writes .DS_Store into every directory a
+						// macOS user opens, the task tree included. Listing
+						// it is right; blocking on it taught people to reach
+						// for --force without reading the list, which is the
+						// one thing this check cannot afford (finding L2).
+						out = append(out, Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: p, Severity: "info"})
 					default:
 						out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
 						if d.IsDir() {
@@ -360,6 +327,13 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 			}
 		case "copy":
 			if sum, err := tree.Hash(p); err != nil || sum != slot.Hash {
+				// A slot recorded by an older wkt may still name an OS
+				// artifact; today's tree never copies one. Either way it is
+				// not work at risk.
+				if artifact.IsRegenerable(slot.RelPath) {
+					out = append(out, Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: slot.RelPath, Severity: "info"})
+					continue
+				}
 				out = append(out, Blocker{Code: "WKT_COPY_DIVERGED", Path: slot.RelPath})
 			}
 		}

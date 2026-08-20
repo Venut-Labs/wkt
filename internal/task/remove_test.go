@@ -1077,3 +1077,51 @@ func TestDescribePorcelainKeepsThePaths(t *testing.T) {
 		}
 	}
 }
+
+// TestOSArtifactAtTheTreeRootDoesNotBlockRemoval covers live-run finding L2
+// at the teardown end: opening a task tree in Finder writes .DS_Store into
+// the tree root, which the untracked-tree-content check treated as work at
+// risk — so on macOS an ordinary look at the folder made the task
+// undeletable without --force.
+func TestOSArtifactAtTheTreeRootDoesNotBlockRemoval(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-finder", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	root := c.TreePath("feat-finder")
+	if err := os.WriteFile(filepath.Join(root, ".DS_Store"), []byte("finder junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t2, err := state.Load(c.StateDir(), "feat-finder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockers, err := Preflight(c, t2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range blockers {
+		if b.Path != "" && strings.HasSuffix(b.Path, ".DS_Store") && b.Severity != "info" {
+			t.Fatalf(".DS_Store must be listed, never blocking: %+v", b)
+		}
+	}
+	if err := Remove(c, "feat-finder", false); err != nil {
+		t.Fatalf("a tree whose only extra content is an OS artifact must remove cleanly: %v", err)
+	}
+}
+
+// TestRealUntrackedContentAtTheTreeRootStillBlocks is the other half: the
+// exemption is for artifacts, not for anything at the tree root.
+func TestRealUntrackedContentAtTheTreeRootStillBlocks(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-notes", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.TreePath("feat-notes"), "notes.md"), []byte("real work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-notes", false); err == nil {
+		t.Fatal("untracked content at the tree root must still block removal")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"wkt/internal/artifact"
 	"wkt/internal/discover"
 	"wkt/internal/paths"
 	"wkt/internal/state"
@@ -126,6 +127,12 @@ func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *
 			return wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot inspect a workspace entry").WithPath(filepath.Join(abs, name))
 		case info.Mode()&os.ModeSymlink != 0, info.IsDir():
 			p.LinkDirs = append(p.LinkDirs, relSlash)
+		case artifact.IsRegenerable(relSlash):
+			// An OS artifact (.DS_Store and friends) carries no work and is
+			// rewritten by the file manager on its own. Copying it in makes
+			// a copy slot whose hash diverges the first time anyone opens
+			// the *tree* in Finder, which then blocked removal on a file
+			// nobody created on purpose (live-run finding L2).
 		default:
 			p.CopyFiles = append(p.CopyFiles, relSlash)
 		}
