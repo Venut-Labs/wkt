@@ -5,7 +5,10 @@ run. Executing it surfaced the following defects **in the plan itself** — not 
 the implementations, which transcribed it faithfully. Every one was reproduced
 against a real binary or real git before being fixed.
 
-Port these back into the plan before anyone follows it again.
+**Status: ported.** Every listing in the plan now carries the code that actually
+ran, each task states the traps that produced these entries, and the two spec
+corrections at the bottom are applied. This file stays as the record of *what*
+was wrong and why, which the plan itself does not preserve.
 
 ## Code the plan got wrong
 
@@ -52,13 +55,15 @@ Port these back into the plan before anyone follows it again.
 ## Placeholders the plan shipped
 
 `var _ = fmt.Sprintf`, `var _ = strings.TrimSpace`, `var _ = os.Exit` — three
-imports propped up rather than removed, in three different files.
+imports propped up rather than removed, in three different files. The plan's
+global constraints now forbid the shape outright.
 
-## Spec corrections the execution forced
+## Spec corrections the execution forced (applied)
 
 - §5.7 promises the staging fence "degrades to a per-repo sequence" across
   filesystems. Degrading a fence to a non-atomic sequence defeats its purpose;
   the implementation refuses instead, and the spec should say so.
 - §5.3 rule 4's symlink-target check was omitted from the plan entirely. A
   repository below the discovery bound was consequently shared writable by every
-  task until the final review caught it.
+  task until the final review caught it. The spec was already right; the plan now
+  carries the rule in its global constraints and in task 7.

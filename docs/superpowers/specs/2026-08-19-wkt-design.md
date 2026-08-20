@@ -761,8 +761,10 @@ worktree becomes immediately prunable and `git worktree prune` has no grace
 period. Rollback is `mv` back followed by
 `git -C <store> worktree repair <restored-path>` **per repository** — the path
 argument is mandatory; bare `worktree repair` does not rediscover a moved tree.
-If `staging/` would be a cross-device move, the fence degrades to a per-repo
-sequence and `wkt` says so rather than pretending atomicity.
+If `staging/` would be a cross-device move, `wkt` **refuses** and says so.
+Degrading the fence to a non-atomic per-repo sequence defeats the only thing the
+fence is for: a still-running agent's cwd has to vanish in one rename, or the
+agent keeps writing into a tree that is halfway deleted.
 
 Removal is innermost-first, and every check for every repository completes before
 anything is removed.
