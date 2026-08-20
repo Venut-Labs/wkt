@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"wkt/internal/gitx"
 	"wkt/internal/paths"
 )
 
@@ -41,11 +40,11 @@ func Walk(workspace string, maxDepth int) ([]Entry, error) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
-		if strings.Count(rel, string(filepath.Separator)) >= maxDepth {
+		if strings.Count(rel, string(filepath.Separator)) > maxDepth {
 			return fs.SkipDir
 		}
 		if d.Type()&os.ModeSymlink != 0 {
-			return fs.SkipDir // never follow symlinks (spec §5.3 rule 4)
+			return nil // never follow symlinks (spec §5.3 rule 4), skip only this entry
 		}
 		if d.Name() != ".git" {
 			return nil
@@ -77,31 +76,59 @@ func classify(gitMarker, repoDir string) Kind {
 		return KindRepo
 	}
 	target := strings.TrimSpace(strings.TrimPrefix(string(b), "gitdir:"))
-	if strings.Contains(target, string(filepath.Separator)+"worktrees"+string(filepath.Separator)) {
+
+	// Resolve target relative to repoDir
+	var gitdir string
+	if filepath.IsAbs(target) {
+		gitdir = target
+	} else {
+		gitdir = filepath.Join(repoDir, target)
+	}
+
+	// Check if gitdir contains a gitdir file (linked worktree marker)
+	if _, err := os.Stat(filepath.Join(gitdir, "gitdir")); err == nil {
 		return KindLinkedWorktree
 	}
+
+	// Fall back to substring matching for submodules
 	if strings.Contains(target, string(filepath.Separator)+"modules"+string(filepath.Separator)) {
 		return KindSubmodule
 	}
-	if gitx.RunOK(repoDir, "rev-parse", "--git-common-dir") {
-		return KindRepo
-	}
+
 	return KindRepo
 }
 
 func markNested(entries []Entry) {
+	// First pass: collect all repositories to analyze
+	var repos []*Entry
 	for i := range entries {
-		if entries[i].Kind != KindRepo {
-			continue
+		if entries[i].Kind == KindRepo {
+			repos = append(repos, &entries[i])
 		}
-		for j := range entries {
-			if i == j || entries[j].Kind != KindRepo {
+	}
+
+	// Second pass: for each repo, find all containing repos and pick the deepest one
+	for _, e := range repos {
+		var containers []*Entry
+		for _, c := range repos {
+			if e == c {
 				continue
 			}
-			if paths.IsUnder(entries[i].AbsPath, entries[j].AbsPath) {
-				entries[i].Kind = KindNested
-				entries[i].ContainedBy = entries[j].RelPath
+			if paths.IsUnder(e.AbsPath, c.AbsPath) {
+				containers = append(containers, c)
 			}
+		}
+
+		if len(containers) > 0 {
+			// Find the deepest container (longest AbsPath)
+			deepest := containers[0]
+			for _, c := range containers[1:] {
+				if len(c.AbsPath) > len(deepest.AbsPath) {
+					deepest = c
+				}
+			}
+			e.Kind = KindNested
+			e.ContainedBy = deepest.RelPath
 		}
 	}
 }
