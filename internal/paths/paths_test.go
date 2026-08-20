@@ -51,3 +51,15 @@ func TestIsUnderRejectsLexicalSiblings(t *testing.T) {
 		t.Fatal("a real child must be under its parent")
 	}
 }
+
+func TestIsUnderMultiLevelNonexistent(t *testing.T) {
+	base := t.TempDir()
+	b := filepath.Join(base, "b")
+	if err := os.Mkdir(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// x and y both don't exist
+	if !IsUnder(filepath.Join(b, "x", "y"), b) {
+		t.Fatal("b/x/y must be under b even though x and y don't exist")
+	}
+}

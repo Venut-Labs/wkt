@@ -15,17 +15,13 @@ func Canonical(p string) (string, error) {
 	if err == nil {
 		return resolved, nil
 	}
-	// Path doesn't exist; try to resolve parent directories
+	// Path doesn't exist; try to resolve parent directories recursively
 	parent := filepath.Dir(abs)
 	if parent == abs {
 		// We're at the root
 		return abs, nil
 	}
-	resolvedParent, err := filepath.EvalSymlinks(parent)
-	if err != nil {
-		// Parent also doesn't exist; just return the absolute path
-		return abs, nil
-	}
+	resolvedParent, _ := Canonical(parent)
 	// Return the parent with the original filename appended
 	return filepath.Join(resolvedParent, filepath.Base(abs)), nil
 }
