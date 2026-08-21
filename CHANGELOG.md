@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.4.2 — 2026-08-21
+
+The perimeter made task trees unusable: nothing could be built in one, and
+nothing could be fetched or pushed from one. Both are fixed, and both were
+found by measuring rather than by reading the design.
 
 - **A task tree can be built in again.** The perimeter switches Claude Code's
   sandbox on, which confines writes to the working directory — and every
