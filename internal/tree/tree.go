@@ -13,11 +13,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"wkt/internal/artifact"
-	"wkt/internal/discover"
-	"wkt/internal/paths"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/artifact"
+	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 type Plan struct {

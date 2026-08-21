@@ -14,14 +14,14 @@ import (
 	"strings"
 	"syscall"
 
-	"wkt/internal/artifact"
-	"wkt/internal/container"
-	"wkt/internal/gitx"
-	"wkt/internal/paths"
-	"wkt/internal/perimeter"
-	"wkt/internal/state"
-	"wkt/internal/tree"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/artifact"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/gitx"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/perimeter"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/tree"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // Severity distinguishes a blocker that gates removal from one that is

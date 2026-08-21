@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"wkt/internal/container"
-	"wkt/internal/discover"
-	"wkt/internal/state"
-	"wkt/internal/store"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/store"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func g(t *testing.T, dir string, args ...string) string {

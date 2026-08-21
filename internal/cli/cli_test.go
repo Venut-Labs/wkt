@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func seedRepo(t *testing.T, dir string) {
@@ -1170,5 +1170,22 @@ func TestRemovingATaskRefreshesTheSurvivorsPerimeter(t *testing.T) {
 	out.Reset()
 	if code := Run([]string{"status", "keeper", "--workspace", ws}, &out, &errb); code != 0 {
 		t.Fatalf("the survivor must not be left in drift, exited %d:\n%s", code, out.String())
+	}
+}
+
+// TestVersionVerb — the release build stamps a version in, and a binary that
+// cannot say which one it is makes every bug report guesswork.
+func TestVersionVerb(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-v"} {
+		var out, errb bytes.Buffer
+		if code := Run([]string{arg}, &out, &errb); code != 0 {
+			t.Fatalf("%s exited %d: %s", arg, code, errb.String())
+		}
+		if !strings.HasPrefix(out.String(), "wkt ") {
+			t.Fatalf("%s printed %q", arg, out.String())
+		}
+	}
+	if !strings.Contains(usage, "wkt version") {
+		t.Fatal("usage must document the version verb")
 	}
 }

@@ -10,15 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"wkt/internal/container"
-	"wkt/internal/discover"
-	"wkt/internal/gitx"
-	"wkt/internal/paths"
-	"wkt/internal/perimeter"
-	"wkt/internal/state"
-	"wkt/internal/store"
-	"wkt/internal/tree"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/gitx"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/perimeter"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/store"
+	"github.com/Venut-Labs/wkt/internal/tree"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // Resolution pairs a resolved repository with the problems found for it.

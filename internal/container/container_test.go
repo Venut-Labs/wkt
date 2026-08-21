@@ -6,8 +6,8 @@ import (
 	"syscall"
 	"testing"
 
-	"wkt/internal/paths"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func TestLocateIsSiblingAndNeverInsideWorkspace(t *testing.T) {

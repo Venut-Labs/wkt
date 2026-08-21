@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func Run(dir string, args ...string) (string, error) {

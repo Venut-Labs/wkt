@@ -14,13 +14,13 @@ import (
 	"sort"
 	"strings"
 
-	"wkt/internal/container"
-	"wkt/internal/discover"
-	"wkt/internal/gitx"
-	"wkt/internal/perimeter"
-	"wkt/internal/state"
-	"wkt/internal/task"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/gitx"
+	"github.com/Venut-Labs/wkt/internal/perimeter"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/task"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 const usage = `wkt — one task, one branch, many repositories
@@ -31,9 +31,17 @@ const usage = `wkt — one task, one branch, many repositories
   wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
   wkt perimeter [TASK] [--workspace DIR] [--check]
+  wkt version
 `
 
+// Version is filled in by the binary at startup; see cmd/wkt.
+var Version = "dev"
+
 func Run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
+		fmt.Fprintln(stdout, "wkt "+Version)
+		return 0
+	}
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2

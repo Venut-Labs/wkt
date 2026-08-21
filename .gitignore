@@ -6,3 +6,7 @@ reffernces/
 
 # Built binary
 /wkt
+
+# Design notes, plans and the hazard register live outside the repository
+docs/
+

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"wkt/internal/discover"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func TestRemoveRefusesOnIgnoredButPreciousFile(t *testing.T) {

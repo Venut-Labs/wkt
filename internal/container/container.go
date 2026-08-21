@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"syscall"
 
-	"wkt/internal/paths"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 type C struct {

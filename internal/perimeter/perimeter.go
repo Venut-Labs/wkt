@@ -24,10 +24,10 @@ import (
 	"strconv"
 	"strings"
 
-	"wkt/internal/container"
-	"wkt/internal/paths"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/paths"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // MaxPaths caps the deny list well below the measured failure point. The

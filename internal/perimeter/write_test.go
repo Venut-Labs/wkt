@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"wkt/internal/container"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // treeFixture builds a container with a real task tree on disk: one

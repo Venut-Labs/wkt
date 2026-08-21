@@ -1,5 +1,9 @@
 # wkt
 
+[![CI](https://github.com/Venut-Labs/wkt/actions/workflows/ci.yml/badge.svg)](https://github.com/Venut-Labs/wkt/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Venut-Labs/wkt.svg)](https://pkg.go.dev/github.com/Venut-Labs/wkt)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 One task, one branch, many repositories.
 
 A change rarely fits in one repository. `wkt` gives each task its own tree
@@ -34,9 +38,13 @@ refuses while anything in the tree would lose work.
 
 macOS and Linux. Windows is out of scope (symlinks plus deletion semantics).
 
-## Build
+## Install
 
-Go 1.26, standard library only, no third-party dependencies.
+```sh
+go install github.com/Venut-Labs/wkt/cmd/wkt@latest
+```
+
+Or build from a clone — standard library only, no third-party dependencies:
 
 ```sh
 go build -o wkt ./cmd/wkt
@@ -44,7 +52,7 @@ go test ./...                                  # unit tests
 WT_CMD=$PWD/wkt bash test/run.sh               # acceptance battery
 ```
 
-Requires `git` 2.29 or newer (`git worktree repair`).
+Requires `git` 2.29 or newer (`git worktree repair`), macOS or Linux.
 
 ## Use
 
@@ -80,12 +88,6 @@ under `problems` (what is in the way), with `remedy` reserved for what to do.
   dependency installation are out of scope.
 - **A task over a repository with submodules cannot be removed** until the
   submodule is deinitialised — `new` warns when it sees one.
-
-## Design
-
-`docs/superpowers/specs/2026-08-19-wkt-design.md` is the spec: what is built,
-what was measured, and what was deliberately left out. The plan that built v0,
-and the defects executing it surfaced, are beside it under `docs/superpowers/plans/`.
 
 ## License
 

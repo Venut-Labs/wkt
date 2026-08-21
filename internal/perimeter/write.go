@@ -7,9 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"wkt/internal/container"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // Divergence is one copy that no longer matches what wkt wrote.

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: git version
+        # The tool refuses to run below 2.29 (git worktree repair), so the
+        # runner's version is worth recording in the log.
+        run: git --version
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd internal)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: unit tests
+        run: go test ./...
+
+      - name: acceptance battery
+        # The battery drives the real binary through real git repositories:
+        # it is the half of the suite that would notice a change git made.
+        run: |
+          go build -o "$RUNNER_TEMP/wkt" ./cmd/wkt
+          WT_CMD="$RUNNER_TEMP/wkt" bash test/run.sh

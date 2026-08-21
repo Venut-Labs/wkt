@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"wkt/internal/container"
-	"wkt/internal/state"
-	"wkt/internal/wkterr"
+	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func fixture(t *testing.T, siblings ...string) (container.C, state.Task, []string) {
