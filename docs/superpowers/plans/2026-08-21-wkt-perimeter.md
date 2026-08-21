@@ -224,7 +224,15 @@ accepted and does nothing.
 
 ---
 
-### Task 3: Write the copies, record the hashes
+### Task 3: Write the copies, record the hashes — **DONE 2026-08-21**
+
+**Result:** `internal/perimeter/write.go`, 6 tests. `Write` covers the tree root
+and each materialised repository, checks every destination *before* writing any
+of them, refuses a settings file wkt does not own (and refuses a symlink at that
+path outright), and writes atomically. `Verify` reports missing and diverged
+copies. All seven mutations were caught, including "copies go only to the tree
+root", "coverage includes back-fill slots" and "the ownership check runs after
+the write".
 
 **Files:**
 - Modify: `internal/perimeter/perimeter.go`
@@ -260,12 +268,12 @@ accepted and does nothing.
 - `os.MkdirAll` on `<repo>/.claude` succeeds when the directory already exists;
   that is fine, but the *file* check must happen before the write, not after.
 
-- [ ] **Step 1: Write the failing tests**
-- [ ] **Step 2: Confirm they fail**
-- [ ] **Step 3: Implement**
-- [ ] **Step 4: Mutation check** — make `Write` follow a back-fill link; the
+- [x] **Step 1: Write the failing tests**
+- [x] **Step 2: Confirm they fail**
+- [x] **Step 3: Implement**
+- [x] **Step 4: Mutation check** — make `Write` follow a back-fill link; the
       workspace-write test must go red.
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
