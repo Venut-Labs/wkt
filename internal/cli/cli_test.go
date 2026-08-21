@@ -1044,3 +1044,131 @@ func TestPerimeterCheckCatchesATaskWithNoPerimeter(t *testing.T) {
 		t.Fatalf("after repair the check must be clean, exited %d: %s", code, out.String())
 	}
 }
+
+// TestStatusReportsPerimeterCoverage — status is where a user finds out what
+// the perimeter actually covers, which is never "everything" (H6a).
+func TestStatusReportsPerimeterCoverage(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("status exited %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "perimeter") {
+		t.Fatalf("status must report perimeter coverage:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "2") {
+		t.Fatalf("coverage should name how many directories are covered:\n%s", out.String())
+	}
+}
+
+// TestStatusReportsPerimeterDrift — an edited copy is drift, exit 3, like any
+// other drift.
+func TestStatusReportsPerimeterDrift(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	f := filepath.Join(containerOf(t, ws), "trees", "t1", ".claude", "settings.json")
+	if err := os.WriteFile(f, []byte(`{"$wkt":{"version":1},"permissions":{"deny":[]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 3 {
+		t.Fatalf("a diverged perimeter copy is drift, exited %d:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "PERIMETER") {
+		t.Fatalf("status must name the perimeter problem:\n%s", out.String())
+	}
+}
+
+// TestStatusReportsAStalePerimeter — a perimeter that predates a sibling does
+// not name that sibling's tree, and H16 means a wide glob cannot cover it. The
+// user has to be told, because nothing else will.
+func TestStatusReportsAStalePerimeter(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	// Freeze t1's perimeter directory so creating t2 cannot refresh it.
+	dir := filepath.Join(containerOf(t, ws), "trees", "t1", ".claude")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+	mustRun(t, &out, &errb, "new", "t2", "--all", "--workspace", ws)
+
+	out.Reset()
+	code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb)
+	if code != 3 {
+		t.Fatalf("a stale perimeter is drift, exited %d:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "STALE") {
+		t.Fatalf("status must say the perimeter is out of date:\n%s", out.String())
+	}
+}
+
+// TestStatusNeverClaimsIsolation pins a promise the project has already broken
+// once (finding F2): v0 makes no isolation claim at all, and a promise is
+// cheaper to keep with a test than with memory.
+func TestStatusNeverClaimsIsolation(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+	out.Reset()
+	Run([]string{"status", "--workspace", ws}, &out, &errb)
+	blob := strings.ToLower(out.String() + errb.String() + usage)
+	for _, word := range []string{"isolated", "isolation", "sandboxed from", "secure"} {
+		if strings.Contains(blob, word) {
+			t.Fatalf("wkt claims %q; v0.1 makes no isolation claim (spec §0, §9):\n%s", word, blob)
+		}
+	}
+}
+
+// TestRemovingATaskRefreshesTheSurvivorsPerimeter — new refreshes siblings, so
+// rm must too, or every removal leaves the others naming a tree that is gone.
+func TestRemovingATaskRefreshesTheSurvivorsPerimeter(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "keeper", "--all", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "goner", "--all", "--workspace", ws)
+
+	f := filepath.Join(containerOf(t, ws), "trees", "keeper", ".claude", "settings.json")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "goner") {
+		t.Fatal("precondition: keeper's perimeter should name goner")
+	}
+	mustRun(t, &out, &errb, "rm", "goner", "--workspace", ws)
+
+	after, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), "goner") {
+		t.Fatal("after removal the survivor's perimeter must stop naming the tree that is gone")
+	}
+	out.Reset()
+	if code := Run([]string{"status", "keeper", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the survivor must not be left in drift, exited %d:\n%s", code, out.String())
+	}
+}

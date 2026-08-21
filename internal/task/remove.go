@@ -18,6 +18,7 @@ import (
 	"wkt/internal/container"
 	"wkt/internal/gitx"
 	"wkt/internal/paths"
+	"wkt/internal/perimeter"
 	"wkt/internal/state"
 	"wkt/internal/tree"
 	"wkt/internal/wkterr"
@@ -471,6 +472,32 @@ func Remove(c container.C, name string, force bool) error {
 	return finishRemove(c, t, name, staged)
 }
 
+// refreshAfterRemoval regenerates every surviving task's perimeter so it stops
+// naming a tree that no longer exists. Create already does this when a tree
+// appears; without the mirror image, every removal leaves the survivors stale
+// and status reporting drift nobody caused.
+//
+// Failures are swallowed for the same reason as at create time: the removal
+// succeeded, and a survivor that could not be refreshed is stale, not broken.
+func refreshAfterRemoval(c container.C) {
+	names, err := state.List(c.StateDir())
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		other, err := state.Load(c.StateDir(), n)
+		if err != nil {
+			continue
+		}
+		coverage, hashes, err := perimeter.Write(c, other, names)
+		if err != nil {
+			continue
+		}
+		other.PerimeterCoverage, other.PerimeterHashes = coverage, hashes
+		_ = state.Save(c.StateDir(), other)
+	}
+}
+
 // finishRemove does the git-side cleanup (unlock, prune, delete the task
 // branch, delete the base pin from the workspace repository) and removes
 // the task's state, for every path that reaches it: a normal removal just
@@ -499,6 +526,9 @@ func finishRemove(c container.C, t state.Task, name, staged string) error {
 	if err := os.Remove(filepath.Join(c.StateDir(), name+".json")); err != nil && !os.IsNotExist(err) {
 		return wkterr.New("WKT_STATE_WRITE", "cannot remove task state").WithPath(name)
 	}
+	// The task is gone from state, so this now regenerates exactly the
+	// survivors' perimeters, dropping the tree that just disappeared.
+	refreshAfterRemoval(c)
 	return nil
 }
 

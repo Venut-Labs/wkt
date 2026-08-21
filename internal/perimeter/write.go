@@ -183,3 +183,28 @@ func marked(b []byte) bool {
 	}
 	return probe.Marker.Version > 0
 }
+
+// Stale reports whether the perimeter on disk is what today's task list would
+// produce. It is a different question from Verify: a copy can match its
+// recorded hash exactly and still be out of date, because a task created since
+// is not named in it — and sibling trees have to be named individually (H16),
+// so nothing else covers them.
+func Stale(c container.C, t state.Task, names []string) (bool, error) {
+	doc, err := For(c, t, names)
+	if err != nil {
+		return false, err
+	}
+	body, err := Render(doc)
+	if err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+	for _, dir := range t.PerimeterCoverage {
+		if t.PerimeterHashes[dir] != want {
+			return true, nil
+		}
+	}
+	return len(t.PerimeterCoverage) == 0, nil
+}
+

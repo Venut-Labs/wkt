@@ -382,7 +382,20 @@ still refused.
 
 ---
 
-### Task 6: Coverage and drift in `status`
+### Task 6: Coverage and drift in `status` — **DONE 2026-08-21**
+
+**Result:** `status` reports how many directories each task's perimeter covers,
+names every missing or diverged copy, and flags a perimeter that no longer
+matches the current task list. All three are drift, exit 3.
+`TestStatusNeverClaimsIsolation` greps the whole output and the usage string for
+"isolated", "isolation", "sandboxed from" and "secure" — a promise the project
+broke once already (F2) is cheaper to keep with a test than with memory.
+
+**Two defects this surfaced.** `status <task>` narrowed the task list before the
+staleness check, so a perimeter was compared against itself and always looked
+current; the check now takes the full list. And `rm` never refreshed the
+survivors, so every removal left them naming a tree that no longer existed —
+`new` had done this since Task 4, and the mirror image was simply missing.
 
 **Files:**
 - Modify: `internal/cli/cli.go`, `internal/task/remove.go` (Preflight already
@@ -398,11 +411,11 @@ still refused.
   greps the whole `status` output for it and fails — cheap, and it pins a
   promise the project has already broken once (finding F2).
 
-- [ ] **Step 1: Write the failing tests**
-- [ ] **Step 2: Confirm they fail**
-- [ ] **Step 3: Implement**
-- [ ] **Step 4: Mutation check** — mark a diverged copy as clean; the drift test must go red
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write the failing tests**
+- [x] **Step 2: Confirm they fail**
+- [x] **Step 3: Implement**
+- [x] **Step 4: Mutation check** — 6 mutations, all caught
+- [x] **Step 5: Commit**
 
 ---
 

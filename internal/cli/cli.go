@@ -333,7 +333,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err := requireContainer(c); err != nil {
 			return fail(stderr, err)
 		}
-		names, _ := state.List(c.StateDir())
+		// Two different lists: which tasks to report on, and which tasks
+		// exist. The staleness check needs the second — narrowing it to the
+		// task being reported compares a perimeter against itself and always
+		// says fine.
+		allNames, _ := state.List(c.StateDir())
+		names := allNames
 		if positional != "" {
 			names = []string{positional}
 		}
@@ -360,6 +365,24 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			}
 			for _, r := range t.Repos {
 				fmt.Fprintf(stdout, "  %-*s %s\n", width, r.RelPath, r.Branch)
+			}
+			// Coverage, then drift. A user needs to know which directories
+			// this file actually governs, because it is never all of them:
+			// a session started below a covered directory has no perimeter
+			// at all (H6a), and saying otherwise would be the one lie this
+			// feature cannot afford.
+			fmt.Fprintf(stdout, "  perimeter  %d directories covered\n", len(t.PerimeterCoverage))
+			div, err := perimeter.Verify(c, t)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			for _, d := range div {
+				drift = true
+				fmt.Fprintf(stdout, "  ! WKT_PERIMETER_%s %s\n", strings.ToUpper(d.Reason), d.Dir)
+			}
+			if stale, err := perimeter.Stale(c, t, allNames); err == nil && stale && len(div) == 0 {
+				drift = true
+				fmt.Fprintf(stdout, "  ! WKT_PERIMETER_STALE   does not match the current task list; run wkt perimeter\n")
 			}
 			for _, b := range blockers {
 				// Only blocking-severity entries are drift. Info-severity
