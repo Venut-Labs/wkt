@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/Venut-Labs/wkt/internal/container"
+	"github.com/Venut-Labs/wkt/internal/gitx"
 	"github.com/Venut-Labs/wkt/internal/paths"
 	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
@@ -64,6 +65,16 @@ type Permissions struct {
 type Sandbox struct {
 	Enabled    bool       `json:"enabled"`
 	Filesystem Filesystem `json:"filesystem"`
+	Network    Network    `json:"network,omitempty"`
+}
+
+// Network is the egress allowlist. With the sandbox on, everything else is
+// refused by the proxy — measured inside a covered tree, "git ls-remote
+// origin" failed with "CONNECT tunnel failed, response 403". A task that
+// cannot reach its own repositories' upstream cannot fetch or push, which is
+// most of the point of having the task.
+type Network struct {
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
 }
 
 type Filesystem struct {
@@ -155,6 +166,7 @@ func For(c container.C, t state.Task, siblings []string) (Document, error) {
 				AllowWrite: append(spellingsOf(c.StoreDir()), toolchainCaches()...),
 				DenyRead:   credentialDirs(),
 			},
+			Network: Network{AllowedDomains: originHosts(t)},
 		},
 	}, nil
 }
@@ -258,4 +270,70 @@ func toolchainCaches() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// originHosts are the forge hosts this task's own repositories point at.
+//
+// Derived, never broadened: a task gets to reach the upstreams of the
+// repositories it contains and nothing else. A repository with no remote, or
+// one whose remote is a local path, opens nothing at all.
+func originHosts(t state.Task) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range t.Repos {
+		url, err := gitx.Run(r.AbsPath, "config", "--get", "remote.origin.url")
+		if err != nil {
+			continue
+		}
+		if host := hostFromRemoteURL(strings.TrimSpace(url)); host != "" && !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hostFromRemoteURL pulls the host out of a git remote, in the spellings
+// remotes actually come in: https:// and ssh:// URLs, the scp-like
+// "git@host:path" form, and local paths — which have no host and must not
+// produce one.
+func hostFromRemoteURL(url string) string {
+	url = strings.TrimSpace(url)
+	switch {
+	case url == "", strings.HasPrefix(url, "/"), strings.HasPrefix(url, "."),
+		strings.HasPrefix(url, "file://"):
+		return ""
+	}
+	if i := strings.Index(url, "://"); i >= 0 {
+		rest := url[i+3:]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			rest = rest[at+1:] // strip any userinfo, credentials included
+		}
+		if slash := strings.IndexAny(rest, "/"); slash >= 0 {
+			rest = rest[:slash]
+		}
+		return stripPort(rest)
+	}
+	// scp-like: [user@]host:path — the colon separates the path, not a port.
+	colon := strings.Index(url, ":")
+	if colon < 0 {
+		return ""
+	}
+	hostPart := url[:colon]
+	if at := strings.LastIndex(hostPart, "@"); at >= 0 {
+		hostPart = hostPart[at+1:]
+	}
+	if hostPart == "" || strings.Contains(hostPart, "/") {
+		return ""
+	}
+	return hostPart
+}
+
+// stripPort removes a ":port" suffix, since the allowlist takes hosts.
+func stripPort(host string) string {
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		return host[:i]
+	}
+	return host
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -302,5 +303,117 @@ func TestCacheOverridesFromTheEnvironmentAreHonoured(t *testing.T) {
 		if !strings.Contains(allowed, p) {
 			t.Errorf("a cache moved by the environment must still be writable: %s not in\n%s", p, allowed)
 		}
+	}
+}
+
+// TestOriginHostsAreReachable — the perimeter switches the sandbox on, which
+// routes egress through a proxy that refuses anything not on the allowlist.
+// Measured inside a covered task tree:
+//
+//	git ls-remote origin → fatal: CONNECT tunnel failed, response 403
+//
+// So a task could neither fetch nor push: the tool that exists to carry work
+// across repositories could not reach the repositories. The hosts the task's
+// own repositories point at are allowed — those and nothing else.
+func TestOriginHostsAreReachable(t *testing.T) {
+	c, task, _ := fixture(t)
+	// Two repositories, two different forge hosts, plus one with no remote.
+	setOrigin(t, filepath.Join(c.Workspace, "services", "svc-a"), "https://github.com/acme/svc-a.git")
+	task.Repos = append(task.Repos, state.Repo{
+		RelPath: "docs", AbsPath: filepath.Join(c.Workspace, "docs"), StoreID: "docs-1234abcd",
+	})
+	seedBareRepo(t, filepath.Join(c.Workspace, "docs"))
+	setOrigin(t, filepath.Join(c.Workspace, "docs"), "git@gitlab.example.com:team/docs.git")
+
+	d, err := For(c, task, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(d.Sandbox.Network.AllowedDomains, ",")
+	for _, want := range []string{"github.com", "gitlab.example.com"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a task must be able to reach %s; allowed: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "acme") || strings.Contains(got, "team") {
+		t.Errorf("only the host, never the path: %q", got)
+	}
+}
+
+// TestNoOriginMeansNoNetwork — a repository with no upstream, or one whose
+// remote is a local path, opens nothing. The allowlist is derived, never
+// broadened "just in case".
+func TestNoOriginMeansNoNetwork(t *testing.T) {
+	c, task, _ := fixture(t) // fixture repositories have no origin
+	d, err := For(c, task, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Sandbox.Network.AllowedDomains) != 0 {
+		t.Fatalf("nothing to reach, so nothing should be opened: %v", d.Sandbox.Network.AllowedDomains)
+	}
+
+	setOrigin(t, filepath.Join(c.Workspace, "services", "svc-a"), filepath.Join(c.Workspace, "mirror.git"))
+	d, err = For(c, task, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Sandbox.Network.AllowedDomains) != 0 {
+		t.Fatalf("a local-path remote is not a host: %v", d.Sandbox.Network.AllowedDomains)
+	}
+}
+
+// TestHostFromRemoteURL covers the spellings a remote actually comes in.
+func TestHostFromRemoteURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://github.com/acme/repo.git":            "github.com",
+		"https://user:token@github.com/acme/repo.git": "github.com",
+		"http://internal.example:8080/repo.git":       "internal.example",
+		"ssh://git@ssh.github.com:443/acme/repo.git":  "ssh.github.com",
+		"git@github.com:acme/repo.git":                "github.com",
+		"gitlab.example.com:team/docs.git":            "gitlab.example.com",
+		"/srv/mirrors/repo.git":                       "",
+		"file:///srv/mirrors/repo.git":                "",
+		// A file:// URL may carry a host and still be local. Opening a
+		// network domain for it would be wrong, and it is the case that
+		// distinguishes the local-path guard from the parsing below it.
+		"file://nas.local/srv/mirrors/repo.git": "",
+		"../sibling.git":                        "",
+		"":                                      "",
+	} {
+		if got := hostFromRemoteURL(in); got != want {
+			t.Errorf("hostFromRemoteURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// setOrigin gives a fixture directory a remote. The fixture only makes
+// directories, so it is initialised here — the perimeter reads the remote with
+// git, and a directory that is not a repository has nothing to read.
+func setOrigin(t *testing.T, dir, url string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".git")); os.IsNotExist(statErr) {
+		run(t, dir, "init", "-q")
+	}
+	run(t, dir, "remote", "add", "origin", url)
+}
+
+func seedBareRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, dir, "init", "-q")
+}
+
+func run(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %s", args, dir, out)
 	}
 }

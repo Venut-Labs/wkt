@@ -12,6 +12,14 @@
   now — `~/.cache`, `~/Library/Caches`, Go's module cache, and whatever
   `GOCACHE`, `GOMODCACHE`, `CARGO_HOME` or `npm_config_cache` point at.
   Verified that the workspace, sibling trees and wkt's own state stay closed.
+- **A task can reach its own repositories' upstream again.** The same sandbox
+  routes egress through a proxy that refuses anything not on an allowlist, so
+  inside a covered tree `git ls-remote origin` failed with `CONNECT tunnel
+  failed, response 403` — no fetch, no push, from the tool whose job is
+  carrying work across repositories. The perimeter now allows exactly the hosts
+  the task's own repositories point at, derived from their origins: a
+  repository with no remote, or one whose remote is a local path, opens
+  nothing, and a host no repository in the task uses stays refused.
 
 ## v0.4.1 — 2026-08-21
 
