@@ -1487,3 +1487,59 @@ func TestAddVerb(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncAndFetchVerbs — the CLI seam for the two commands that move work
+// between a task and the repositories the developer works in.
+func TestSyncAndFetchVerbs(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	// Nothing has moved yet.
+	out.Reset()
+	if code := Run([]string{"sync", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("sync on an untouched task exited %d:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "up to date") {
+		t.Fatalf("sync should say so:\n%s", out.String())
+	}
+
+	// The workspace moves on: sync reports drift and exits 3, without moving
+	// the task's base.
+	repo := filepath.Join(ws, "a")
+	gitCmd(t, repo, "commit", "-qm", "moved on", "--allow-empty")
+	out.Reset()
+	if code := Run([]string{"sync", "t1", "--workspace", ws}, &out, &errb); code != 3 {
+		t.Fatalf("drift must exit 3, got %d:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "behind") {
+		t.Fatalf("sync must say how far behind:\n%s", out.String())
+	}
+
+	// Work in the task comes back with fetch.
+	tree := filepath.Join(containerOf(t, ws), "trees", "t1", "a")
+	gitCmd(t, tree, "commit", "-qm", "task work", "--allow-empty")
+	out.Reset()
+	if code := Run([]string{"fetch", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("fetch exited %d:\n%s", code, out.String()+errb.String())
+	}
+	if !strings.Contains(out.String(), "refs/heads/t1") {
+		t.Fatalf("fetch must say where it put the branch:\n%s", out.String())
+	}
+	if code := Run([]string{"fetch", "--workspace", ws}, &out, &errb); code != 2 {
+		t.Fatal("fetch needs a task name")
+	}
+}
+
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	full := append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %s", args, out)
+	}
+}

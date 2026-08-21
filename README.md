@@ -66,6 +66,10 @@ wkt status                             # what exists, and what has drifted
 wkt rm feat-42                         # refuses while anything would be lost
 wkt rm feat-42 --force                 # override, behind a staging fence
 
+wkt add feat-42 --repos shared         # graft another repository onto a live task
+wkt sync feat-42                       # has the base moved on? (never moves it for you)
+wkt fetch feat-42                      # bring the task's branches back, fast-forward only
+
 wkt perimeter --check                  # is each task's perimeter current?
 wkt doctor                             # does state still match the disk?
 wkt doctor --all                       # everything wkt has written into your repositories

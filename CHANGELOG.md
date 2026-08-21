@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `wkt add TASK --repos b` grafts another repository onto a live task **at the
+  task's recorded base epoch**, not today's tip: a task is a coherent slice of
+  time across a set of repositories, and a latecomer arriving at HEAD would be
+  based on work the rest of the set has never seen. The repository's back-fill
+  link becomes a real worktree, and a failed add puts the link back.
+- `wkt sync TASK` fetches in every store and reports how far each repository's
+  base has drifted — across **both** remotes, so a colleague's push and your own
+  unpushed commits both count. It never advances the base itself.
+- `wkt fetch TASK [--as NAME]` brings the task's branches back into the
+  repositories you work in. Fast-forward only: if the branch there is not an
+  ancestor, it refuses, names both commits, and offers `--as`. It never forces
+  a ref you own, and it checks the whole set before moving any of them.
+
 ## v0.2.0 — 2026-08-21
 
 Claude Code integration, and a command that reconciles what wkt thinks with

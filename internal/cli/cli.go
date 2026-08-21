@@ -33,6 +33,8 @@ const usage = `wkt — one task, one branch, many repositories
   wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
   wkt add    TASK --repos a,b [--workspace DIR]
+  wkt sync   TASK [--workspace DIR]
+  wkt fetch  TASK [--as NAME] [--workspace DIR]
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
@@ -76,11 +78,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	// that means nothing must not read as success (finding F6).
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var ws, repos, exclude *string
+	var ws, repos, exclude, as *string
 	var all, force, dryRun, check, fix *bool
 	nul := func() *string { v := ""; return &v }
 	nulB := func() *bool { v := false; return &v }
-	ws, repos, exclude = nul(), nul(), nul()
+	ws, repos, exclude, as = nul(), nul(), nul(), nul()
 	all, force, dryRun, check, fix = nulB(), nulB(), nulB(), nulB(), nulB()
 
 	ws = fs.String("workspace", ".", "workspace directory")
@@ -93,6 +95,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		all = fs.Bool("all", false, "select every discovered repository")
 	case "add":
 		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths to graft on")
+	case "fetch":
+		as = fs.String("as", "", "bring the branch in under another name")
 	case "rm":
 		force = fs.Bool("force", false, "remove even though work would be lost")
 	case "doctor":
@@ -302,6 +306,58 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				return fail(stderr, err)
 			}
 			fmt.Fprintln(stdout, rel)
+		}
+		return 0
+
+	case "sync":
+		// Fetch in every store and report drift. It never advances the base
+		// itself: that is what the task was cut from, and moving it under
+		// half-finished work is a decision, not a refresh (spec §6).
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		report, err := task.Sync(c, positional)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		drifted := false
+		for _, rep := range report {
+			if rep.Drifted {
+				drifted = true
+				fmt.Fprintf(stdout, "  %-28s %d commit(s) behind %s\n", rep.Repo, rep.Behind, short(rep.Tip))
+			} else {
+				fmt.Fprintf(stdout, "  %-28s up to date\n", rep.Repo)
+			}
+		}
+		if drifted {
+			return 3
+		}
+		return 0
+
+	case "fetch":
+		// Bring the task's branches back into the repositories the developer
+		// works in. Fast-forward only; a branch they own is never forced.
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		results, err := task.Fetch(c, positional, *as)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		for _, res := range results {
+			if res.Updated {
+				fmt.Fprintf(stdout, "  %-28s %s -> %s\n", res.Repo, short(res.SHA), res.Ref)
+			} else {
+				fmt.Fprintf(stdout, "  %-28s nothing to bring over\n", res.Repo)
+			}
 		}
 		return 0
 
@@ -818,4 +874,12 @@ The SessionStart entry keeps a task's perimeter current: WorktreeCreate only
 fires for the tree being created, so a task made later is not named in an
 older task's deny list until something regenerates it.
 `, exe, exe, exe)
+}
+
+// short is the seven-character prefix git itself shows.
+func short(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
