@@ -14,6 +14,7 @@ import (
 	"wkt/internal/discover"
 	"wkt/internal/gitx"
 	"wkt/internal/paths"
+	"wkt/internal/perimeter"
 	"wkt/internal/state"
 	"wkt/internal/store"
 	"wkt/internal/tree"
@@ -266,11 +267,58 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 		BaseEpoch:          time.Now().UTC(),
 		Repos:              repos, Links: slots,
 	}
+
+	// The perimeter is written before the state that describes it, and its
+	// copies live inside the tree — so the tree's own undo, registered before
+	// the tree was created, already removes them on any failure below. No
+	// separate undo is needed for the copies themselves.
+	siblings, _ := state.List(c.StateDir())
+	coverage, hashes, err := perimeter.Write(c, t, append(siblings, name))
+	if err != nil {
+		rollback()
+		return state.Task{}, err
+	}
+	t.PerimeterCoverage, t.PerimeterHashes = coverage, hashes
+
 	if err := state.Save(c.StateDir(), t); err != nil {
 		rollback()
 		return state.Task{}, err
 	}
+
+	// Every existing task's deny list must learn about this new tree, because
+	// sibling trees are named individually (H16: a wide glob with a narrower
+	// allow for the task's own tree does not work). A sibling that cannot be
+	// refreshed is stale, not broken: this task is correct, and status reports
+	// the drift. Failing the creation here would let one unwritable directory
+	// block every future task.
+	refreshSiblings(c, name)
+
 	return t, nil
+}
+
+// refreshSiblings regenerates the perimeter of every other task so it names
+// the tree that was just created. Errors are deliberately swallowed: see the
+// call site.
+func refreshSiblings(c container.C, created string) {
+	names, err := state.List(c.StateDir())
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		if n == created {
+			continue
+		}
+		other, err := state.Load(c.StateDir(), n)
+		if err != nil {
+			continue
+		}
+		coverage, hashes, err := perimeter.Write(c, other, names)
+		if err != nil {
+			continue // stale, and status will say so
+		}
+		other.PerimeterCoverage, other.PerimeterHashes = coverage, hashes
+		_ = state.Save(c.StateDir(), other)
+	}
 }
 
 // worktreeName reads back the admin directory git actually chose, which it

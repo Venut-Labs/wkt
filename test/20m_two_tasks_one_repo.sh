@@ -34,7 +34,11 @@ echo "A" >> "$TA/svc-a/src/index.js"
 ( cd "$TA/svc-a" && G add -A && G commit -qm "A change" >/dev/null )
 assert_eq "task B does not see task A's commit" \
   "$(cd "$TB/svc-a" && git log --oneline | wc -l | tr -d ' ')" "1"
-assert_eq "task B stays clean" "$(cd "$TB/svc-a" && git status --porcelain)" ""
+# Clean apart from the perimeter wkt writes into every materialised
+# repository — an untracked .claude/settings.json is wkt's own file, not the
+# developer's work.
+assert_eq "task B stays clean" \
+  "$(cd "$TB/svc-a" && git status --porcelain -uall | grep -v '\.claude/settings\.json$')" ""
 assert_eq "the workspace stays on its own branch" \
   "$(cd "$WS/svc-a" && git rev-parse --abbrev-ref HEAD)" "main"
 

@@ -277,7 +277,29 @@ the write".
 
 ---
 
-### Task 4: `new` writes the perimeter
+### Task 4: `new` writes the perimeter — **DONE 2026-08-21**
+
+**Result:** phase two writes the perimeter before the state that describes it,
+and records coverage and hashes in the same state write. The copies live inside
+the tree, so the tree's own undo — registered before the tree existed — already
+removes them on rollback; no separate undo was added, and a test pins that.
+Creating a task refreshes every sibling's perimeter, and a sibling that cannot
+be refreshed is stale rather than fatal.
+
+**Measured, not assumed** (the plan required a number): creating 20 tasks over
+3 repositories, the 20th `new` took 0.50s against the 1st's 0.65s — sibling
+regeneration is not visible at this scale. The 20th task's perimeter carries 66
+deny rules in 10.9 KB, against the ~5,000-rule bound measured in Task 1.
+
+**The collision this surfaced.** The perimeter is a file wkt writes *into* the
+tree, so every teardown check immediately saw it as the user's uncommitted
+work: `?? .claude/` in each repository and untracked content at the tree root.
+`Preflight` now knows which files it owns — the per-repository status check runs
+with `-uall` so an untracked directory does not collapse to one line, and the
+tree walk descends into `.claude` instead of blocking on it. A mutation that
+exempted the whole `.claude` directory rather than the single file survived the
+suite, so `TestUserContentBesideThePerimeterStillBlocks` was added: a user's
+`agents/reviewer.md` beside the perimeter must still block removal.
 
 **Files:**
 - Modify: `internal/task/create.go`
@@ -302,13 +324,13 @@ the write".
 - The "regenerate the siblings" step is where a 20-task workspace becomes
   quadratic. Measure it once at 20 tasks and record the number.
 
-- [ ] **Step 1: Write the failing tests** (creation writes it; rollback removes
+- [x] **Step 1: Write the failing tests** (creation writes it; rollback removes
       it; creating B refreshes A; A's failure does not fail B)
-- [ ] **Step 2: Confirm they fail**
-- [ ] **Step 3: Implement**
-- [ ] **Step 4: Mutation check** — remove the sibling regeneration; the
-      B-refreshes-A test must go red.
-- [ ] **Step 5: Commit**
+- [x] **Step 2: Confirm they fail**
+- [x] **Step 3: Implement**
+- [x] **Step 4: Mutation check** — 5 mutations, one survived and produced a new
+      test before it was called done.
+- [x] **Step 5: Commit**
 
 ---
 

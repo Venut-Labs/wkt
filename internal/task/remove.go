@@ -58,7 +58,25 @@ type Blocker struct {
 // into a worktree, a link slot an agent turned into a real file) is still
 // found. It never descends into a symlink: those are workspace back-fill
 // slots, not part of the tree wkt owns.
+// ownedByWkt returns the perimeter copies wkt wrote into this tree, keyed by
+// their path relative to the tree root. They are wkt's own files, so neither
+// the per-repository status check nor the tree walk may report them as the
+// user's uncommitted work — a tool that refuses to clean up after itself is
+// worse than one that never wrote the file.
+func ownedByWkt(c container.C, t state.Task) map[string]bool {
+	treeRoot := c.TreePath(t.Name)
+	owned := map[string]bool{}
+	for _, dir := range t.PerimeterCoverage {
+		f := filepath.Join(dir, ".claude", "settings.json")
+		if rel, err := filepath.Rel(treeRoot, f); err == nil {
+			owned[filepath.Clean(rel)] = true
+		}
+	}
+	return owned
+}
+
 func Preflight(c container.C, t state.Task) ([]Blocker, error) {
+	perimeterOwned := ownedByWkt(c, t)
 	var out []Blocker
 	treeRoot := c.TreePath(t.Name)
 
@@ -68,10 +86,13 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 			out = append(out, Blocker{Code: "WKT_WORKTREE_MISSING", Repo: r.RelPath, Path: wt})
 			continue
 		}
-		// 1+2: uncommitted and untracked.
-		if s, err := gitx.Run(wt, "status", "--porcelain"); err != nil {
+		// 1+2: uncommitted and untracked. -uall so an untracked directory is
+		// listed file by file rather than collapsing to "?? .claude/": the
+		// perimeter copy wkt itself wrote lives in there, and collapsing hides
+		// whether anything else does.
+		if s, err := gitx.Run(wt, "status", "--porcelain", "-uall"); err != nil {
 			out = append(out, Blocker{Code: "WKT_CHECK_FAILED", Repo: r.RelPath, Path: wt})
-		} else if s != "" {
+		} else if s = dropOwned(s, wt, c.TreePath(t.Name), perimeterOwned); s != "" {
 			out = append(out, Blocker{Code: "WKT_DIRTY", Repo: r.RelPath, Path: wt, Detail: describePorcelain(s)})
 		}
 		// 3: ignored content. git's own refusal never fires on any of it (H1).
@@ -231,6 +252,14 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 					case ancestorOfSomething(rel):
 						// a real directory on the path to something recorded;
 						// fall through and keep descending.
+					case perimeterOwned[rel]:
+						// wkt's own perimeter copy: its integrity is checked
+						// by hash in status, not by refusing to remove the
+						// tree that contains it.
+					case d.IsDir() && ownsSomethingUnder(perimeterOwned, rel):
+						// ".claude" itself, on the way to the copy above.
+						// Descend rather than blocking, so a *user* file
+						// beside the perimeter is still found.
 					case artifact.IsRegenerable(rel):
 						// Finder writes .DS_Store into every directory a
 						// macOS user opens, the task tree included. Listing
@@ -556,4 +585,40 @@ func plural(n, noun string) string {
 		return n + " " + noun
 	}
 	return n + " " + noun + "s"
+}
+
+// dropOwned removes wkt's own perimeter copies from a porcelain listing,
+// leaving everything else — so a repository whose only untracked file is the
+// perimeter reads as clean, while one that also carries the user's own
+// .claude/agents/foo.md still blocks.
+func dropOwned(status, wt, treeRoot string, owned map[string]bool) string {
+	if status == "" || len(owned) == 0 {
+		return status
+	}
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(status, "\n"), "\n") {
+		f := strings.SplitN(strings.TrimLeft(line, " "), " ", 2)
+		if len(f) != 2 {
+			kept = append(kept, line)
+			continue
+		}
+		rel, err := filepath.Rel(treeRoot, filepath.Join(wt, strings.TrimSpace(f[1])))
+		if err != nil || !owned[filepath.Clean(rel)] {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// ownsSomethingUnder reports whether any perimeter copy lives below rel, so
+// the walk descends into the directory holding it instead of blocking on the
+// directory itself.
+func ownsSomethingUnder(owned map[string]bool, rel string) bool {
+	prefix := rel + string(filepath.Separator)
+	for p := range owned {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }

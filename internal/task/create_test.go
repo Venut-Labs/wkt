@@ -1,6 +1,8 @@
 package task
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 
 	"wkt/internal/container"
 	"wkt/internal/discover"
+	"wkt/internal/state"
 	"wkt/internal/store"
 	"wkt/internal/wkterr"
 )
@@ -389,5 +392,117 @@ func TestSubmoduleWarningsNamesEverySelectedRepositoryWithASubmodule(t *testing.
 	}
 	if SubmoduleWarnings(entries, []string{"plain"}) != nil {
 		t.Fatal("a selection without submodules must warn about nothing")
+	}
+}
+
+// TestCreateWritesThePerimeter — spec §9 puts the generator before new in the
+// build order precisely because "new writes the file, so it cannot come
+// later". A task without a perimeter is a task that silently has none.
+func TestCreateWritesThePerimeter(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-p", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := c.TreePath("feat-p")
+	for _, dir := range []string{tree, filepath.Join(tree, "docs")} {
+		f := filepath.Join(dir, ".claude", "settings.json")
+		if _, statErr := os.Stat(f); statErr != nil {
+			t.Fatalf("no perimeter at %s: %v", f, statErr)
+		}
+	}
+	if len(task.PerimeterCoverage) != 2 {
+		t.Fatalf("state must record what is covered, got %v", task.PerimeterCoverage)
+	}
+	if len(task.PerimeterHashes) != 2 {
+		t.Fatalf("state must record a hash per copy, got %v", task.PerimeterHashes)
+	}
+	// The recorded state has to survive the round trip, or status reads back
+	// an empty coverage and reports every task as uncovered.
+	reloaded, err := state.Load(c.StateDir(), "feat-p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.PerimeterCoverage) != 2 || len(reloaded.PerimeterHashes) != 2 {
+		t.Fatalf("coverage must round-trip through state: %+v", reloaded)
+	}
+}
+
+// TestCreatingASecondTaskRefreshesTheFirstsPerimeter — the deny list names
+// sibling trees individually (H16: a wide glob with a narrower allow does not
+// work), so a task created later is invisible to an older perimeter until it
+// is regenerated.
+func TestCreatingASecondTaskRefreshesTheFirstsPerimeter(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-first", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(c.TreePath("feat-first"), ".claude", "settings.json")
+	before, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(before), "feat-second") {
+		t.Fatal("the first task cannot already know about a task that does not exist")
+	}
+
+	if _, err := Create(c, entries, "feat-second", []string{"services/svc-a"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "feat-second") {
+		t.Fatalf("the first task's perimeter must be refreshed to name the new sibling:\n%s", after)
+	}
+	// And its recorded hash must match what is now on disk, or status will
+	// report drift the moment a second task exists.
+	reloaded, err := state.Load(c.StateDir(), "feat-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(after)
+	if reloaded.PerimeterHashes[c.TreePath("feat-first")] != hex.EncodeToString(sum[:]) {
+		t.Fatal("refreshing a sibling's perimeter must update its recorded hash too")
+	}
+}
+
+// TestASiblingRefreshFailureDoesNotFailTheNewTask — the new task is correct;
+// the older one is merely stale, which is what status is for. Failing the
+// creation would make one unwritable directory block every future task.
+func TestASiblingRefreshFailureDoesNotFailTheNewTask(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-stale", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	// Make the older task's perimeter directory unwritable.
+	dir := filepath.Join(c.TreePath("feat-stale"), ".claude")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755)
+
+	if _, err := Create(c, entries, "feat-new", []string{"services/svc-a"}); err != nil {
+		t.Fatalf("a stale sibling must not block a new task: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(c.TreePath("feat-new"), ".claude", "settings.json")); err != nil {
+		t.Fatalf("the new task's own perimeter must still be written: %v", err)
+	}
+}
+
+// TestRollbackTakesThePerimeterWithIt — the copies live inside the tree, so
+// the tree's own undo removes them; this pins that the undo really does run
+// before anything claims the task failed cleanly.
+func TestRollbackTakesThePerimeterWithIt(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-doomed", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-doomed", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.TreePath("feat-doomed")); !os.IsNotExist(err) {
+		t.Fatal("the tree, and with it every perimeter copy, must be gone")
 	}
 }

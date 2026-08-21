@@ -204,7 +204,7 @@ func TestPreflightDetectsInProgressBisect(t *testing.T) {
 	g(t, wt, "bisect", "bad", bad)
 	g(t, wt, "bisect", "good", good)
 
-	if s := g(t, wt, "status", "--porcelain"); s != "" {
+	if s := statusWithoutPerimeter(t, wt); s != "" {
 		t.Fatalf("test setup invariant broken: expected a clean status mid-bisect, got %q", s)
 	}
 
@@ -249,7 +249,7 @@ func TestRemoveRefusesOnSubmoduleEvenWithForce(t *testing.T) {
 	}
 	g(t, wt, "commit", "-qm", "add submodule")
 
-	if s := g(t, wt, "status", "--porcelain"); s != "" {
+	if s := statusWithoutPerimeter(t, wt); s != "" {
 		t.Fatalf("test setup invariant broken: expected a clean status after committing the submodule, got %q", s)
 	}
 
@@ -1123,5 +1123,58 @@ func TestRealUntrackedContentAtTheTreeRootStillBlocks(t *testing.T) {
 	}
 	if err := Remove(c, "feat-notes", false); err == nil {
 		t.Fatal("untracked content at the tree root must still block removal")
+	}
+}
+
+// statusWithoutPerimeter is "is this worktree clean apart from the perimeter
+// wkt itself wrote". Since task 4, every materialised repository carries an
+// untracked .claude/settings.json, so a bare porcelain check no longer means
+// what these fixtures need it to mean.
+func statusWithoutPerimeter(t *testing.T, wt string) string {
+	t.Helper()
+	var kept []string
+	for _, line := range strings.Split(strings.TrimRight(g(t, wt, "status", "--porcelain", "-uall"), "\n"), "\n") {
+		if line == "" || strings.HasSuffix(line, ".claude/settings.json") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// TestUserContentBesideThePerimeterStillBlocks — the exemption added in task 4
+// is for the one file wkt wrote, not for the .claude directory. A mutation
+// that exempted the whole directory survived the suite until this test
+// existed, which is exactly the shape of "the guard is gone and everything is
+// still green".
+func TestUserContentBesideThePerimeterStillBlocks(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-beside", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	root := c.TreePath("feat-beside")
+	// A file the user put next to the perimeter, in the same directory.
+	if err := os.MkdirAll(filepath.Join(root, ".claude", "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".claude", "agents", "reviewer.md"),
+		[]byte("my custom agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-beside", false); err == nil {
+		t.Fatal("content the user put beside the perimeter must still block removal")
+	}
+
+	// And the same one directory deeper, inside a materialised repository.
+	c2, entries2 := fixture(t)
+	if _, err := Create(c2, entries2, "feat-beside2", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	repoClaude := filepath.Join(c2.TreePath("feat-beside2"), "docs", ".claude")
+	if err := os.WriteFile(filepath.Join(repoClaude, "notes.md"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c2, "feat-beside2", false); err == nil {
+		t.Fatal("content beside the perimeter inside a repository must block too")
 	}
 }
