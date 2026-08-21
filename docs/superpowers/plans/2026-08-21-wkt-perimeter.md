@@ -334,7 +334,26 @@ suite, so `TestUserContentBesideThePerimeterStillBlocks` was added: a user's
 
 ---
 
-### Task 5: `wkt perimeter [<task>] [--check]`
+### Task 5: `wkt perimeter [<task>] [--check]` — **DONE 2026-08-21**
+
+**Result:** the verb regenerates every task, or one named task, and `--check`
+reports without writing (exit 3 on drift, matching `status`). A task with no
+recorded coverage reports `uncovered` rather than clean — that is exactly what
+every task created before this feature looks like, and reporting it clean would
+make the check useless where it is most needed.
+
+**F6 decided: fixed, not deferred.** Each verb now builds its own flag set, so
+`wkt path t --force`, `wkt init --repos a` and `wkt new t --check` exit 2
+instead of being accepted in silence.
+
+**A guard that blocked its own repair.** The first run of the new test hit
+`WKT_PERIMETER_FOREIGN`: a task whose state had lost its hashes could not have
+its perimeter regenerated, because `Write` mistook its own output for the user's
+file. The document now carries a `"$wkt"` marker — verified on 2.1.238 that
+Claude Code ignores unknown top-level keys and still enforces the deny rules —
+so ownership is a property of the file rather than of state, which can be lost.
+Adoption keys on the marker, never on the filename: an unmarked settings file is
+still refused.
 
 **Files:**
 - Modify: `internal/cli/cli.go`
@@ -354,11 +373,12 @@ suite, so `TestUserContentBesideThePerimeterStillBlocks` was added: a user's
   `--check` to the shared set where `wkt path --check` would silently accept it.
   Either fix F6 here or scope the flag deliberately and say which.
 
-- [ ] **Step 1: Write the failing tests** — including that `--check` writes nothing
-- [ ] **Step 2: Confirm they fail**
-- [ ] **Step 3: Implement**
-- [ ] **Step 4: Mutation check** — let `--check` write; its test must go red
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write the failing tests** — including that `--check` writes nothing
+- [x] **Step 2: Confirm they fail**
+- [x] **Step 3: Implement**
+- [x] **Step 4: Mutation check** — 5 mutations; one survived twice and produced
+      both a new test and the marker design before this was called done
+- [x] **Step 5: Commit**
 
 ---
 

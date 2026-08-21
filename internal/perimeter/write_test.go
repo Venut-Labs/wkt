@@ -232,3 +232,45 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestWriteAdoptsItsOwnMarkedFileWhenStateForgot — state can be lost,
+// hand-edited, or written by a wkt that predates the perimeter. The file
+// carries a marker saying who wrote it, so the command that exists to repair
+// that case is not blocked by its own guard.
+func TestWriteAdoptsItsOwnMarkedFileWhenStateForgot(t *testing.T) {
+	c, task := treeFixture(t)
+	if _, _, err := Write(c, task, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The file stays on disk; state forgets all about it.
+	task.PerimeterCoverage, task.PerimeterHashes = nil, nil
+
+	if _, _, err := Write(c, task, []string{"later-task"}); err != nil {
+		t.Fatalf("wkt must adopt a file carrying its own marker: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(c.TreePath("feat-42"), ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "later-task") {
+		t.Fatal("the adopted file must be regenerated, not merely tolerated")
+	}
+}
+
+// TestWriteStillRefusesAnUnmarkedFile is the other half: adoption keys on the
+// marker, not on the filename, so the user's own settings are still safe.
+func TestWriteStillRefusesAnUnmarkedFile(t *testing.T) {
+	c, task := treeFixture(t)
+	dir := filepath.Join(c.TreePath("feat-42"), ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Valid JSON, plausibly a settings file, but not wkt's.
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"permissions":{"deny":["Edit(//tmp/**)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Write(c, task, nil); err == nil {
+		t.Fatal("a settings file without wkt's marker must still be refused")
+	}
+}

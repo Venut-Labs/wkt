@@ -17,6 +17,7 @@ import (
 	"wkt/internal/container"
 	"wkt/internal/discover"
 	"wkt/internal/gitx"
+	"wkt/internal/perimeter"
 	"wkt/internal/state"
 	"wkt/internal/task"
 	"wkt/internal/wkterr"
@@ -29,6 +30,7 @@ const usage = `wkt — one task, one branch, many repositories
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
+  wkt perimeter [TASK] [--workspace DIR] [--check]
 `
 
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -48,14 +50,32 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		cmd = "rm"
 	}
 
+	// One flag set per verb, not one shared by all of them. Sharing meant
+	// "wkt path t --force --all" was accepted in silence, which is the same
+	// failure as init succeeding on a workspace that does not exist: input
+	// that means nothing must not read as success (finding F6).
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	ws := fs.String("workspace", ".", "workspace directory")
-	repos := fs.String("repos", "", "comma-separated workspace-relative repository paths")
-	all := fs.Bool("all", false, "select every discovered repository")
-	force := fs.Bool("force", false, "remove even though work would be lost")
-	dryRun := fs.Bool("dry-run", false, "report without writing anything")
-	exclude := fs.String("exclude", "", "comma-separated nested repositories to exclude from adoption")
+	var ws, repos, exclude *string
+	var all, force, dryRun, check *bool
+	nul := func() *string { v := ""; return &v }
+	nulB := func() *bool { v := false; return &v }
+	ws, repos, exclude = nul(), nul(), nul()
+	all, force, dryRun, check = nulB(), nulB(), nulB(), nulB()
+
+	ws = fs.String("workspace", ".", "workspace directory")
+	switch cmd {
+	case "init":
+		dryRun = fs.Bool("dry-run", false, "report without writing anything")
+		exclude = fs.String("exclude", "", "comma-separated nested repositories to exclude from adoption")
+	case "new":
+		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths")
+		all = fs.Bool("all", false, "select every discovered repository")
+	case "rm":
+		force = fs.Bool("force", false, "remove even though work would be lost")
+	case "perimeter":
+		check = fs.Bool("check", false, "report without writing anything")
+	}
 
 	// The task name may fall anywhere among the flags: before all of them,
 	// after all of them, or split between two of them ("new --workspace WS
@@ -208,6 +228,62 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2
 		}
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
+		return 0
+
+	case "perimeter":
+		// Regenerate, or with --check report and write nothing. Drift exits 3,
+		// matching status's contract, so a script can gate on either.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		names, _ := state.List(c.StateDir())
+		if positional != "" {
+			names = []string{positional}
+		}
+		drift := false
+		for _, n := range names {
+			t, err := state.Load(c.StateDir(), n)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			if *check {
+				// A task with no recorded coverage is not "nothing to check":
+				// it is a task with no perimeter, which is what every task
+				// created before this feature existed looks like. Reporting
+				// clean there would make the check useless exactly where it
+				// is needed.
+				if len(t.PerimeterCoverage) == 0 {
+					drift = true
+					fmt.Fprintf(stdout, "%s  uncovered  no perimeter recorded\n", n)
+					continue
+				}
+				div, err := perimeter.Verify(c, t)
+				if err != nil {
+					return fail(stderr, err)
+				}
+				for _, d := range div {
+					drift = true
+					fmt.Fprintf(stdout, "%s  %s  %s\n", n, d.Reason, d.Dir)
+				}
+				if len(div) == 0 {
+					fmt.Fprintf(stdout, "%s  covered  %d directories\n", n, len(t.PerimeterCoverage))
+				}
+				continue
+			}
+			all, _ := state.List(c.StateDir())
+			coverage, hashes, err := perimeter.Write(c, t, all)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			t.PerimeterCoverage, t.PerimeterHashes = coverage, hashes
+			if err := state.Save(c.StateDir(), t); err != nil {
+				return fail(stderr, err)
+			}
+			fmt.Fprintf(stdout, "%s  %d directories\n", n, len(coverage))
+		}
+		if drift {
+			return 3
+		}
 		return 0
 
 	case "path":

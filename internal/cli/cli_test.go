@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"os"
 	"os/exec"
@@ -845,5 +846,201 @@ func TestStatusColumnsAlignWhateverThePathLength(t *testing.T) {
 	}
 	if col == -1 {
 		t.Fatalf("status printed no repository lines:\n%s", out.String())
+	}
+}
+
+// TestPerimeterRegeneratesEveryTask — with no task name the verb refreshes
+// them all, which is how a workspace recovers after tasks were created by a
+// version that did not write perimeters, or after someone deleted one.
+func TestPerimeterRegeneratesEveryTask(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t2", "--all", "--workspace", ws)
+
+	// Delete one copy and corrupt another.
+	c := containerOf(t, ws)
+	gone := filepath.Join(c, "trees", "t1", ".claude", "settings.json")
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	edited := filepath.Join(c, "trees", "t2", ".claude", "settings.json")
+	if err := os.WriteFile(edited, []byte(`{"permissions":{"deny":[]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"perimeter", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("perimeter exited %d: %s", code, errb.String())
+	}
+	for _, f := range []string{gone, edited} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("%s was not regenerated: %v", f, err)
+		}
+		if !strings.Contains(string(b), "sandbox") {
+			t.Fatalf("%s does not look like a regenerated perimeter:\n%s", f, b)
+		}
+	}
+
+	// Regenerating has to record the new hashes, or the very next check
+	// reports drift against the file it just wrote — and a report that is
+	// wrong immediately after the repair teaches people to ignore it.
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"perimeter", "--check", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("a check straight after a regeneration must be clean, exited %d: %s", code, out.String())
+	}
+}
+
+// TestPerimeterCheckReportsDriftAndWritesNothing — --check is a report, and a
+// report that repairs what it is reporting on cannot be trusted twice.
+func TestPerimeterCheckReportsDriftAndWritesNothing(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"perimeter", "--check", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("a clean perimeter must check clean, exited %d: %s", code, out.String()+errb.String())
+	}
+
+	f := filepath.Join(containerOf(t, ws), "trees", "t1", ".claude", "settings.json")
+	tampered := []byte(`{"permissions":{"deny":[]}}`)
+	if err := os.WriteFile(f, tampered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"perimeter", "--check", "--workspace", ws}, &out, &errb); code != 3 {
+		t.Fatalf("drift must exit 3, got %d: %s", code, out.String())
+	}
+	back, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(back) != string(tampered) {
+		t.Fatal("--check must not write: it repaired the file it was asked to report on")
+	}
+}
+
+// TestEachVerbAcceptsOnlyItsOwnFlags covers finding F6: every verb shared one
+// flag set, so "wkt path t --force --all" was accepted in silence. Input that
+// means nothing must not read as success — the same rule as defect 24.
+func TestEachVerbAcceptsOnlyItsOwnFlags(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	for _, args := range [][]string{
+		{"path", "t1", "--force", "--workspace", ws},
+		{"path", "t1", "--all", "--workspace", ws},
+		{"init", "--repos", "a", "--workspace", ws},
+		{"init", "--force", "--workspace", ws},
+		{"new", "t2", "--check", "--workspace", ws},
+		{"status", "--force", "--workspace", ws},
+		{"rm", "t1", "--all", "--workspace", ws},
+		{"perimeter", "--repos", "a", "--workspace", ws},
+	} {
+		out.Reset()
+		errb.Reset()
+		if code := Run(args, &out, &errb); code != 2 {
+			t.Errorf("%v: exited %d, want 2 — a flag the verb does not take is a usage error", args, code)
+		}
+	}
+}
+
+// TestEachVerbStillAcceptsItsOwnFlags is the other half: the tightening must
+// not remove a flag a verb is documented to take.
+func TestEachVerbStillAcceptsItsOwnFlags(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "b"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--dry-run", "--workspace", ws)
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--repos", "a", "--workspace", ws)
+	mustRun(t, &out, &errb, "status", "t1", "--workspace", ws)
+	mustRun(t, &out, &errb, "perimeter", "t1", "--workspace", ws)
+	mustRun(t, &out, &errb, "rm", "t1", "--force", "--workspace", ws)
+}
+
+func TestUsageDocumentsPerimeter(t *testing.T) {
+	if !strings.Contains(usage, "wkt perimeter") {
+		t.Fatalf("usage must document the perimeter verb:\n%s", usage)
+	}
+}
+
+func mustRun(t *testing.T, out, errb *bytes.Buffer, args ...string) {
+	t.Helper()
+	out.Reset()
+	errb.Reset()
+	if code := Run(args, out, errb); code != 0 {
+		t.Fatalf("%v exited %d: %s", args, code, out.String()+errb.String())
+	}
+}
+
+func containerOf(t *testing.T, ws string) string {
+	t.Helper()
+	return ws + ".worktrees"
+}
+
+// TestPerimeterCheckCatchesATaskWithNoPerimeter — a task created before this
+// feature existed has no recorded coverage, and that is precisely the case
+// the command exists to repair. Reporting it clean would hide it.
+func TestPerimeterCheckCatchesATaskWithNoPerimeter(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	// Rewrite the state as an older wkt would have left it: no coverage, no
+	// hashes, and no files on disk either.
+	stateFile := filepath.Join(containerOf(t, ws), "state", "tasks", "t1.json")
+	b, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "perimeter_coverage")
+	delete(raw, "perimeter_hashes")
+	nb, _ := json.Marshal(raw)
+	if err := os.WriteFile(stateFile, nb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(containerOf(t, ws), "trees", "t1", ".claude")); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"perimeter", "--check", "--workspace", ws}, &out, &errb); code != 3 {
+		t.Fatalf("a task with no perimeter must report drift, exited %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "uncovered") {
+		t.Fatalf("the report must say what is wrong: %s", out.String())
+	}
+
+	// And the command must be able to repair exactly that.
+	mustRun(t, &out, &errb, "perimeter", "--workspace", ws)
+	out.Reset()
+	if code := Run([]string{"perimeter", "--check", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("after repair the check must be clean, exited %d: %s", code, out.String())
 	}
 }

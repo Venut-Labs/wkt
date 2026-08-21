@@ -3,6 +3,7 @@ package perimeter
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 
@@ -102,6 +103,12 @@ func checkOwned(dir string, t state.Task) error {
 	if _, ours := t.PerimeterHashes[dir]; ours {
 		return nil // wkt wrote this one; regenerating it is the whole point
 	}
+	// State can be lost, hand-edited, or written by a wkt that predates the
+	// perimeter. The file itself carries the answer, so ask it before
+	// refusing to overwrite what is plainly wkt's own output.
+	if b, readErr := os.ReadFile(path); readErr == nil && marked(b) {
+		return nil
+	}
 	return wkterr.New("WKT_PERIMETER_FOREIGN", "a settings file already exists that wkt did not write").
 		WithPath(path).
 		WithRemedy("move the existing file aside if you want wkt to manage this directory",
@@ -164,4 +171,15 @@ func Verify(c container.C, t state.Task) ([]Divergence, error) {
 		}
 	}
 	return out, nil
+}
+
+// marked reports whether a settings file carries wkt's marker.
+func marked(b []byte) bool {
+	var probe struct {
+		Marker Marker `json:"$wkt"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return false
+	}
+	return probe.Marker.Version > 0
 }
