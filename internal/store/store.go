@@ -50,10 +50,22 @@ func Ensure(storeDir, repoAbs, relPath, taskName, baseSHA string) (string, error
 		if err := adoptable(sp, repoAbs); err != nil {
 			return "", err
 		}
+		// Re-run on every Ensure: the developer may have changed their
+		// identity, or dropped a repository-specific one, since the store was
+		// built.
+		if err := bridgeConfig(sp, repoAbs); err != nil {
+			return "", err
+		}
 		return sp, nil
 	}
 
-	if _, err := gitx.Run(storeDir, "clone", "--shared", "--bare", "-q", repoAbs, sp); err != nil {
+	// --template= is not tidiness. Measured: a reference-transaction hook in
+	// the user's init.templateDir fires four times *during* the clone —
+	// before any config can be written — and is then copied into the store,
+	// where it would run on every later operation. Setting core.hooksPath
+	// afterwards cannot undo a run that already happened; an empty template
+	// is the only thing that prevents it.
+	if _, err := gitx.Run(storeDir, "clone", "--template=", "--shared", "--bare", "-q", repoAbs, sp); err != nil {
 		return "", wkterr.New("WKT_STORE_CREATE", "cannot mirror the repository").
 			WithRepo(relPath).WithPath(sp).WithFound(err.Error())
 	}
@@ -93,6 +105,9 @@ func Ensure(storeDir, repoAbs, relPath, taskName, baseSHA string) (string, error
 		if _, err := gitx.Run(sp, "config", kv[0], kv[1]); err != nil {
 			return "", wkterr.New("WKT_STORE_CREATE", "cannot harden the store").WithRepo(relPath).WithFound(err.Error())
 		}
+	}
+	if err := bridgeConfig(sp, repoAbs); err != nil {
+		return "", err
 	}
 	// The marker is written by the code that verifies the invariants, never
 	// by hand. Ordering by convention is how "stamp it last" quietly becomes
@@ -202,4 +217,127 @@ func FetchWorkspace(storePath string) error {
 
 func HasObject(storePath, sha string) bool {
 	return gitx.RunOK(storePath, "cat-file", "-e", sha)
+}
+
+// bridged are the settings a task's commits should share with the repository
+// the work belongs to. A bare clone copies no config, and the store lives
+// outside the workspace where neither .git/config nor an "includeIf gitdir:"
+// can reach it — so without this, commits made in a task are authored with
+// whatever the global identity happens to be.
+//
+// Nothing here can execute. Every excluded key is excluded for that reason:
+// filter.*.clean/smudge/process (which git runs during "worktree add", inside
+// wkt new itself), core.sshCommand, core.fsmonitor, gpg.program,
+// gpg.ssh.program, gpg.ssh.defaultKeyCommand, trailer.*.command,
+// diff.*.textconv, merge.*.driver, credential.helper, init.templateDir,
+// core.pager, core.editor and alias.*. core.hooksPath=/dev/null stops none of
+// them, because none of them are hooks. url.*.insteadOf is excluded too: it
+// silently redirects where the store fetches from.
+//
+// Also excluded: remote.* (wkt owns those, and a narrower refspec would lose
+// refs/remotes/origin/* — spec H15) and the filesystem probes
+// core.ignorecase/precomposeunicode/filemode, which git computes for the
+// directory it is in; forcing another repository's answer onto the store makes
+// it misreport tracked files.
+var bridged = []string{
+	"user.name",
+	"user.email",
+	"user.signingkey",
+	"commit.gpgsign",
+	"tag.gpgsign",
+	"gpg.format",
+	"gpg.ssh.allowedsignersfile",
+	"core.autocrlf",
+	"core.eol",
+}
+
+// bridgeConfig makes the store resolve the same values the workspace
+// repository resolves, writing a local override only where the ambient config
+// does not already agree — and removing one it wrote earlier when the
+// repository no longer needs it.
+//
+// Two reads, not two per key: the whole list comes back in one call per side.
+func bridgeConfig(sp, repoAbs string) error {
+	want, err := effectiveConfig(repoAbs)
+	if err != nil {
+		return nil // a repository whose config cannot be read is not fatal here
+	}
+	local, ambient, err := storeConfig(sp)
+	if err != nil {
+		return nil
+	}
+
+	for _, key := range bridged {
+		desired := want[key]
+		switch {
+		case desired == "" && local[key] != "":
+			// The repository dropped it; stop pinning it.
+			_, _ = gitx.Run(sp, "config", "--local", "--unset-all", key)
+		case desired == "":
+			// Nothing to say about this key.
+		case desired == ambient[key] && local[key] != "":
+			// The ambient config already agrees; drop the redundant override
+			// so a later change to it is picked up.
+			_, _ = gitx.Run(sp, "config", "--local", "--unset-all", key)
+		case desired == ambient[key]:
+			// Already right without a local override.
+		case desired != local[key]:
+			if _, err := gitx.Run(sp, "config", "--local", key, desired); err != nil {
+				return wkterr.New("WKT_STORE_CREATE", "cannot carry the repository's git configuration into the store").
+					WithPath(sp).WithFound(err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+// effectiveConfig is what the repository actually resolves, including values
+// an "includeIf gitdir:" brought in — which is the whole point, since that is
+// how corporate identities are usually configured and exactly what the store
+// cannot see for itself.
+func effectiveConfig(dir string) (map[string]string, error) {
+	out, err := gitx.Run(dir, "config", "--list", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return parseConfigZ(out, false), nil
+}
+
+// storeConfig splits the store's own settings from the ones it inherits, so
+// the bridge can tell "I wrote this" from "the machine already says this".
+func storeConfig(dir string) (local, ambient map[string]string, err error) {
+	out, err := gitx.Run(dir, "config", "--list", "--show-scope", "-z")
+	if err != nil {
+		return nil, nil, err
+	}
+	local, ambient = map[string]string{}, map[string]string{}
+	// Records are NUL-separated as: scope NUL key NEWLINE value.
+	fields := strings.Split(out, "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		scope := fields[i]
+		kv := strings.SplitN(fields[i+1], "\n", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.ToLower(kv[0])
+		if scope == "local" || scope == "worktree" {
+			local[key] = kv[1]
+		} else {
+			ambient[key] = kv[1]
+		}
+	}
+	return local, ambient, nil
+}
+
+// parseConfigZ reads "git config --list -z": key NEWLINE value, NUL-separated.
+func parseConfigZ(out string, _ bool) map[string]string {
+	m := map[string]string{}
+	for _, rec := range strings.Split(out, "\x00") {
+		kv := strings.SplitN(rec, "\n", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		m[strings.ToLower(kv[0])] = kv[1]
+	}
+	return m
 }

@@ -209,3 +209,72 @@ func TestSyncFetchesFromOrigin(t *testing.T) {
 		t.Fatalf("work pushed to origin is drift the task should hear about: %+v", report)
 	}
 }
+
+// TestSyncSaysWhenItCouldNotReachTheUpstream — sync discarded the origin
+// fetch error, so a store that has never once reached its upstream reported
+// "up to date", exit 0. That is the one answer sync must not give when it did
+// not manage to look: wkt's rule everywhere else is that a check which cannot
+// run counts against you, not for you.
+func TestSyncSaysWhenItCouldNotReachTheUpstream(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	repo := filepath.Join(ws, "docs")
+	seed(t, repo)
+	bare := filepath.Join(base, "origin.git")
+	g(t, base, "init", "-q", "--bare", bare)
+	g(t, repo, "remote", "add", "origin", bare)
+	g(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/main")
+
+	c, err := container.Locate(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := container.Create(c); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := discover.Walk(ws, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(c, entries, "feat-unreachable", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The upstream goes away — moved, renamed, VPN down, credentials expired.
+	if err := os.RemoveAll(bare); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Sync(c, "feat-unreachable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report) != 1 {
+		t.Fatalf("want one repository: %+v", report)
+	}
+	if report[0].Unreachable == "" {
+		t.Fatalf("sync must say it could not consult the upstream: %+v", report[0])
+	}
+	if strings.Contains(report[0].Unreachable, "\n") {
+		t.Fatalf("the reason must stay one line: %q", report[0].Unreachable)
+	}
+}
+
+// TestSyncIsSilentAboutAnUpstreamThatDoesNotExist — a repository with no
+// origin at all is not "unreachable", it simply has nowhere to look, and
+// saying otherwise would fire on every local-only repository.
+func TestSyncIsSilentAboutAnUpstreamThatDoesNotExist(t *testing.T) {
+	c, entries := fixture(t) // fixture repositories have no origin
+	if _, err := Create(c, entries, "feat-noorigin", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Sync(c, "feat-noorigin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range report {
+		if r.Unreachable != "" {
+			t.Fatalf("a repository without an origin is not unreachable: %+v", r)
+		}
+	}
+}

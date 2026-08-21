@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+Four fixes, all found by measuring the design's own open questions rather than
+by reading them.
+
+- **Commits made in a task now carry the repository's identity.** A bare clone
+  copies no config and the store lives outside the workspace, so neither
+  `.git/config` nor an `includeIf gitdir:` reached it: work done in a task was
+  authored with whatever the *global* identity happened to be, silently, until
+  a CI identity check or a DCO bot rejected the push. wkt now bridges
+  `user.*`, the signing settings and `core.autocrlf`/`core.eol` into the store,
+  reading what the repository *resolves* rather than what it stores — which is
+  how corporate identities are usually configured. Nothing that can execute is
+  carried: not `filter.*`, `core.sshCommand`, `gpg.program`, `credential.helper`,
+  `trailer.*.command` or `url.*.insteadOf`.
+- **Building a store no longer runs your template hooks.** Measured: a
+  `reference-transaction` hook in `init.templateDir` fires four times during
+  `git clone` — before any config can be written — and is copied into the
+  store. The clone is now made with an empty template.
+- **An unfinished store is never adopted.** A build interrupted after the clone
+  left a directory that looked finished; wkt reused it, and the tree kept
+  borrowing objects from your own repository, so a later `gc` or re-clone made
+  every commit in the task unreadable. wkt now verifies the store's invariants
+  before reuse and refuses with each broken one named — and never deletes or
+  rebuilds it, because the store may hold the only copy of a task's unpushed
+  commits.
+- **`wkt sync` no longer says "up to date" when it could not look.** The origin
+  fetch error was discarded, so a store that had never once reached its
+  upstream reported success. It now says it could not reach origin, and exits 3.
+- **A failed checkout says why.** `wkt new` and `wkt add` threw git's
+  explanation away, so a repository whose checkout runs a content filter
+  (git-lfs is the common one) failed with nothing but "cannot create the
+  worktree". The reason is carried now — with the configured command redacted,
+  because that is where people keep access tokens.
+
 ## v0.3.0 — 2026-08-21
 
 The rest of the command table: a task can gain a repository, learn that its

@@ -18,6 +18,11 @@ type SyncReport struct {
 	Drifted bool
 	Behind  int    // commits the task's base is behind the upstream tip
 	Tip     string // the upstream tip, for the message
+	// Unreachable is set when the repository has an origin that could not be
+	// consulted. It is not the same as having no origin: "I looked and found
+	// nothing new" and "I could not look" are different answers, and only one
+	// of them justifies saying "up to date".
+	Unreachable string
 }
 
 // Sync fetches in every store of the set and reports how far each repository's
@@ -39,7 +44,15 @@ func Sync(c container.C, name string) ([]SyncReport, error) {
 		// Both remotes: origin is the real upstream, workspace is the
 		// developer's own repository, which may hold commits they have not
 		// pushed. A task can be behind either.
-		_, _ = gitx.Run(storePath, "fetch", "--quiet", "origin")
+		unreachable := ""
+		if url, err := gitx.Run(storePath, "config", "--get", "remote.origin.url"); err == nil && strings.TrimSpace(url) != "" {
+			if _, err := gitx.Run(storePath, "fetch", "--quiet", "origin"); err != nil {
+				// Discarding this is how a store that has never once reached
+				// its upstream reported "up to date": the answer sync must not
+				// give when it did not manage to look.
+				unreachable = firstLineOf(err.Error())
+			}
+		}
 		if err := store.FetchWorkspace(storePath); err != nil {
 			return nil, err
 		}
@@ -48,14 +61,15 @@ func Sync(c container.C, name string) ([]SyncReport, error) {
 		if tip == "" {
 			// Nothing to compare against yet — a repository with no origin
 			// and no local movement. Not drift, and not an error.
-			out = append(out, SyncReport{Repo: r.RelPath})
+			out = append(out, SyncReport{Repo: r.RelPath, Unreachable: unreachable})
 			continue
 		}
 		out = append(out, SyncReport{
-			Repo:    r.RelPath,
-			Drifted: behind > 0,
-			Behind:  behind,
-			Tip:     tip,
+			Repo:        r.RelPath,
+			Drifted:     behind > 0,
+			Behind:      behind,
+			Tip:         tip,
+			Unreachable: unreachable,
 		})
 	}
 	return out, nil
@@ -116,4 +130,10 @@ func countBetween(storePath, base, tip string) int {
 		return 0
 	}
 	return n
+}
+
+// firstLineOf keeps a reason to one line, the same constraint every other
+// error surface in wkt has.
+func firstLineOf(s string) string {
+	return strings.SplitN(strings.TrimSpace(s), "\n", 2)[0]
 }

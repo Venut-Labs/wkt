@@ -327,10 +327,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		drifted := false
 		for _, rep := range report {
-			if rep.Drifted {
+			switch {
+			case rep.Unreachable != "":
+				// Not "up to date": wkt did not manage to look, and saying
+				// otherwise is the one answer that misleads.
+				drifted = true
+				fmt.Fprintf(stdout, "  %-28s cannot reach origin: %s\n", rep.Repo, rep.Unreachable)
+			case rep.Drifted:
 				drifted = true
 				fmt.Fprintf(stdout, "  %-28s %d commit(s) behind %s\n", rep.Repo, rep.Behind, short(rep.Tip))
-			} else {
+			default:
 				fmt.Fprintf(stdout, "  %-28s up to date\n", rep.Repo)
 			}
 		}

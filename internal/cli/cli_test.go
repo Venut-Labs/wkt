@@ -1574,3 +1574,36 @@ func TestRepairVerb(t *testing.T) {
 		t.Fatal("repair needs a task name")
 	}
 }
+
+// TestSyncReportsAnUnreachableUpstream — "up to date" from a command that
+// could not reach the upstream is worse than an error, because it is
+// believed.
+func TestSyncReportsAnUnreachableUpstream(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	repo := filepath.Join(ws, "a")
+	seedRepo(t, repo)
+	bare := filepath.Join(base, "origin.git")
+	gitCmd(t, base, "init", "-q", "--bare", bare)
+	gitCmd(t, repo, "remote", "add", "origin", bare)
+	gitCmd(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/main")
+
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	if err := os.RemoveAll(bare); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	code := Run([]string{"sync", "t1", "--workspace", ws}, &out, &errb)
+	if strings.Contains(out.String(), "up to date") {
+		t.Fatalf("sync claimed up to date without reaching the upstream:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "cannot reach origin") {
+		t.Fatalf("sync must say it could not look:\n%s", out.String())
+	}
+	if code != 3 {
+		t.Fatalf("a check that could not run is not a clean result, got exit %d", code)
+	}
+}
