@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1 — 2026-08-21
+
+- `wkt version` now reports the tag a `go install github.com/Venut-Labs/wkt/cmd/wkt@v0.1.1`
+  build came from. v0.1.0 said `dev` there, because that install path passes no
+  ldflags; the version now falls back to the toolchain's own build info.
+
 ## v0.1.0 — 2026-08-21
 
 First release. `wkt` adopts a multi-repo workspace, gives each task its own
