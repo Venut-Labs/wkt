@@ -207,4 +207,3 @@ func Stale(c container.C, t state.Task, names []string) (bool, error) {
 	}
 	return len(t.PerimeterCoverage) == 0, nil
 }
-
