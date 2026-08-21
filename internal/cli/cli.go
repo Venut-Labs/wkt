@@ -32,6 +32,7 @@ const usage = `wkt — one task, one branch, many repositories
 
   wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
+  wkt add    TASK --repos a,b [--workspace DIR]
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
@@ -90,6 +91,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "new":
 		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths")
 		all = fs.Bool("all", false, "select every discovered repository")
+	case "add":
+		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths to graft on")
 	case "rm":
 		force = fs.Bool("force", false, "remove even though work would be lost")
 	case "doctor":
@@ -269,6 +272,37 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2
 		}
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
+		return 0
+
+	case "add":
+		// Grafting a repository onto an existing task, at the task's epoch
+		// rather than today's tip (spec §6).
+		if positional == "" || *repos == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		release, err := container.Lock(c)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		defer release()
+		entries, err := discover.Walk(c.Workspace, 4)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		for _, w := range task.SubmoduleWarnings(entries, splitList(*repos)) {
+			fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
+				w.Code, w.Repo, w.Detail)
+		}
+		for _, rel := range splitList(*repos) {
+			if err := task.Add(c, entries, positional, rel); err != nil {
+				return fail(stderr, err)
+			}
+			fmt.Fprintln(stdout, rel)
+		}
 		return 0
 
 	case "hook":

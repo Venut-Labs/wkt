@@ -1446,3 +1446,44 @@ func TestInitIsQuietWhenThereIsNothingToWarnAbout(t *testing.T) {
 		t.Fatalf("nothing here is below the bound:\n%s", errb.String())
 	}
 }
+
+// TestAddVerb — the CLI seam for grafting a repository onto a live task.
+func TestAddVerb(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "b"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--repos", "a", "--workspace", ws)
+
+	// Before: b is a back-fill link, not a worktree.
+	at := filepath.Join(containerOf(t, ws), "trees", "t1", "b")
+	if info, err := os.Lstat(at); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("precondition: b should start as a back-fill link, got %v %v", info, err)
+	}
+
+	mustRun(t, &out, &errb, "add", "t1", "--repos", "b", "--workspace", ws)
+
+	if info, err := os.Lstat(at); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("b must become a real worktree: %v %v", info, err)
+	}
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("status exited %d after the add:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "b ") {
+		t.Fatalf("status must list the added repository:\n%s", out.String())
+	}
+
+	// Usage: the verb needs both a task and something to add.
+	for _, args := range [][]string{
+		{"add", "--workspace", ws},
+		{"add", "t1", "--workspace", ws},
+	} {
+		out.Reset()
+		if code := Run(args, &out, &errb); code != 2 {
+			t.Errorf("%v: exited %d, want 2", args, code)
+		}
+	}
+}
