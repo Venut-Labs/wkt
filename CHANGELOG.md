@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Claude Code worktree hooks.** `wkt hook install` prints the settings block;
+  after that `claude --worktree` in a multi-repo workspace produces a wkt task
+  tree instead of a single repository's worktree. Re-firing the event returns
+  the same tree, a suggested slug carrying a separator is sanitised rather than
+  refused, and the removal path keeps every teardown refusal.
+- Claude Code's own `.claude/.cc-writes` no longer blocks removal. It appears
+  the first time an agent edits a file, so without this every task driven
+  through the hooks needed `--force` — found by running the real thing.
+
 - `wkt doctor` — reconciles state against the disk: tasks whose tree is gone,
   directories in `trees/` that no task claims, and base pins left in your
   repositories by tasks that no longer exist. `--fix` repairs only what is

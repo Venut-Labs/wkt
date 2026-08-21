@@ -1236,3 +1236,160 @@ func TestDoctorReportsAndFixes(t *testing.T) {
 		t.Fatal("--fix must remove the empty leftover")
 	}
 }
+
+// TestHookWorktreeCreateEmitsOneLineAndIsIdempotent — the whole contract is
+// that single line, and "--resume --worktree" re-fires the event (H14), so
+// firing twice for the same name must hand back the same tree rather than
+// failing with WKT_TASK_EXISTS.
+func TestHookWorktreeCreateEmitsOneLineAndIsIdempotent(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	seedRepo(t, filepath.Join(ws, "b"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+
+	run := func(payload string) (string, int) {
+		out.Reset()
+		errb.Reset()
+		stdin = strings.NewReader(payload)
+		defer func() { stdin = os.Stdin }()
+		code := Run([]string{"hook", "worktree-create", "--workspace", ws}, &out, &errb)
+		return out.String(), code
+	}
+
+	got, code := run(`{"session_id":"s","cwd":"` + ws + `","name":"feat-42"}`)
+	if code != 0 {
+		t.Fatalf("hook exited %d: %s", code, errb.String())
+	}
+	if n := strings.Count(strings.TrimRight(got, "\n"), "\n"); n != 0 {
+		t.Fatalf("stdout must be exactly one line, got %d extra:\n%q", n, got)
+	}
+	tree := strings.TrimSpace(got)
+	if !filepath.IsAbs(tree) {
+		t.Fatalf("the hook must emit an absolute path, got %q", tree)
+	}
+	if strings.Contains(tree, "/../") || strings.Contains(tree, "/./") {
+		t.Fatalf("the binary rejects a path with dot segments: %q", tree)
+	}
+	if st, err := os.Stat(tree); err != nil || !st.IsDir() {
+		t.Fatalf("the emitted path must be a directory: %v", err)
+	}
+
+	again, code := run(`{"session_id":"s","cwd":"` + ws + `","name":"feat-42"}`)
+	if code != 0 {
+		t.Fatalf("re-firing must succeed, exited %d: %s", code, errb.String())
+	}
+	if strings.TrimSpace(again) != tree {
+		t.Fatalf("re-firing must return the same tree:\n%q\n%q", again, tree)
+	}
+}
+
+// TestHookWorktreeCreateSanitisesTheSuggestedName — the slug is a suggestion,
+// not a validated task name, and the contract has nowhere to report a rename.
+func TestHookWorktreeCreateSanitisesTheSuggestedName(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+
+	out.Reset()
+	errb.Reset()
+	stdin = strings.NewReader(`{"name":"feature/x","cwd":"` + ws + `"}`)
+	defer func() { stdin = os.Stdin }()
+	if code := Run([]string{"hook", "worktree-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("a slug with a separator must still produce a worktree, exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	if filepath.Base(tree) != "feature-x" {
+		t.Fatalf("want the sanitised name, got %q", tree)
+	}
+}
+
+// TestHookWorktreeRemoveAcceptsAnySpellingOfThePath — the payload's path may
+// arrive as typed or resolved, and on macOS a temp path resolves through
+// /private, so the two differ. Comparing by string equality would miss one of
+// them, which is why the lookup goes through paths.Spellings.
+func TestHookWorktreeRemoveAcceptsAnySpellingOfThePath(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+
+	// The un-resolved spelling is the interesting one: state records the
+	// canonical path, so this is the case a naive comparison gets wrong.
+	raw := filepath.Join(containerOf(t, ws), "trees", "t-raw")
+	resolved := raw
+	if r, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(raw))); err == nil {
+		resolved = filepath.Join(r, "trees", "t-raw")
+	}
+	if raw == resolved {
+		t.Skip("this platform has no second spelling for the temp path")
+	}
+
+	for name, spelling := range map[string]string{"t-raw": raw, "t-res": resolved} {
+		mustRun(t, &out, &errb, "new", name, "--all", "--workspace", ws)
+		p := strings.Replace(spelling, "t-raw", name, 1)
+		out.Reset()
+		errb.Reset()
+		stdin = strings.NewReader(`{"worktree_path":"` + p + `"}`)
+		if code := Run([]string{"hook", "worktree-remove", "--workspace", ws}, &out, &errb); code != 0 {
+			stdin = os.Stdin
+			t.Fatalf("removing by the %s spelling exited %d: %s", name, code, errb.String())
+		}
+		stdin = os.Stdin
+		if _, err := os.Stat(filepath.Join(containerOf(t, ws), "trees", name)); !os.IsNotExist(err) {
+			t.Fatalf("%s should be gone", name)
+		}
+	}
+}
+
+// TestHookWorktreeRemoveKeepsTheRefusals — the hook is a different entry
+// point, not a way around teardown. Its stderr is what the user sees.
+func TestHookWorktreeRemoveKeepsTheRefusals(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	tree := filepath.Join(containerOf(t, ws), "trees", "t1")
+	if err := os.WriteFile(filepath.Join(tree, "a", "uncommitted.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	stdin = strings.NewReader(`{"worktree_path":"` + tree + `"}`)
+	defer func() { stdin = os.Stdin }()
+	if code := Run([]string{"hook", "worktree-remove", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("uncommitted work must still block a hook-driven removal")
+	}
+	if !strings.Contains(errb.String(), "WKT_WOULD_LOSE_WORK") {
+		t.Fatalf("the refusal must reach stderr, where the user sees it: %q", errb.String())
+	}
+	if _, err := os.Stat(tree); err != nil {
+		t.Fatal("the refused removal must not have deleted anything")
+	}
+}
+
+// TestHookInstallPrintsSomethingUsable — the settings block is what a user
+// pastes; it has to name the real binary and both events.
+func TestHookInstallPrintsSomethingUsable(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := Run([]string{"hook", "install"}, &out, &errb); code != 0 {
+		t.Fatalf("exited %d: %s", code, errb.String())
+	}
+	blob := out.String()
+	for _, want := range []string{"WorktreeCreate", "WorktreeRemove", "hook worktree-create", "hook worktree-remove"} {
+		if !strings.Contains(blob, want) {
+			t.Fatalf("the printed settings must mention %q:\n%s", want, blob)
+		}
+	}
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(blob[strings.Index(blob, "{"):strings.LastIndex(blob, "}")+1]), &probe); err != nil {
+		t.Fatalf("the printed block must be valid JSON: %v\n%s", err, blob)
+	}
+}

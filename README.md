@@ -84,6 +84,23 @@ detected, `4` no container (run `init`), `1` any other typed failure. Errors
 are one line of JSON on stderr; a refusal that has several causes lists them
 under `problems` (what is in the way), with `remedy` reserved for what to do.
 
+## With Claude Code
+
+`claude --worktree` normally cuts a worktree from the one repository the
+session was launched in. Point its worktree hooks at wkt and it asks wkt
+instead, so a session started in a multi-repo workspace lands in a task tree
+covering every repository, all on one branch:
+
+```sh
+wkt hook install        # prints the block to paste into ~/.claude/settings.json
+cd ~/work && claude --worktree
+```
+
+Verified end to end against Claude Code 2.1.238. The teardown keeps its
+refusals on that path too: `WorktreeRemove` will not delete a tree holding
+uncommitted work or unpushed commits, and says why on stderr, where Claude
+Code shows it to you.
+
 ## What it does not promise
 
 - **Not a security boundary**, and **no read-only workspace in v0**: an agent

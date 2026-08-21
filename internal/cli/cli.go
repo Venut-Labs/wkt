@@ -18,6 +18,8 @@ import (
 	"github.com/Venut-Labs/wkt/internal/discover"
 	"github.com/Venut-Labs/wkt/internal/doctor"
 	"github.com/Venut-Labs/wkt/internal/gitx"
+	"github.com/Venut-Labs/wkt/internal/hook"
+	"github.com/Venut-Labs/wkt/internal/paths"
 	"github.com/Venut-Labs/wkt/internal/perimeter"
 	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/task"
@@ -33,11 +35,16 @@ const usage = `wkt — one task, one branch, many repositories
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
   wkt perimeter [TASK] [--workspace DIR] [--check]
   wkt doctor [--workspace DIR] [--fix] [--all]
+  wkt hook   install | worktree-create | worktree-remove | session-start
   wkt version
 `
 
 // Version is filled in by the binary at startup; see cmd/wkt.
 var Version = "dev"
+
+// stdin is where the hook verbs read their payload from. It is a variable so
+// tests can drive the contract without a subprocess.
+var stdin io.Reader = os.Stdin
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v") {
@@ -242,6 +249,106 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
 		return 0
+
+	case "hook":
+		// Claude Code's worktree contracts. stdout carries the created
+		// worktree's path and nothing else: any other line would be read as
+		// part of it, which is why warnings go to stderr here as everywhere.
+		sub := positional
+		switch sub {
+		case "install":
+			printHookSettings(stdout)
+			return 0
+
+		case "worktree-create":
+			payload, err := hook.ParseCreate(stdin)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			if err := requireContainer(c); err != nil {
+				return fail(stderr, err)
+			}
+			name := hook.Slug(payload.Name)
+			// Reattach by default: --resume --worktree re-fires the event
+			// (H14), and a second create for the same name must hand back the
+			// same tree rather than failing.
+			if t, err := state.Load(c.StateDir(), name); err == nil {
+				if _, statErr := os.Stat(c.TreePath(t.Name)); statErr == nil {
+					fmt.Fprintln(stdout, c.TreePath(t.Name))
+					return 0
+				}
+			}
+			release, err := container.Lock(c)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			defer release()
+			entries, err := discover.Walk(c.Workspace, 4)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			selected := selection(entries, "", true)
+			for _, w := range task.SubmoduleWarnings(entries, selected) {
+				fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
+					w.Code, w.Repo, w.Detail)
+			}
+			t, err := task.Create(c, entries, name, selected)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			fmt.Fprintln(stdout, c.TreePath(t.Name))
+			return 0
+
+		case "worktree-remove":
+			payload, err := hook.ParseRemove(stdin)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			if err := requireContainer(c); err != nil {
+				return fail(stderr, err)
+			}
+			name, err := taskForTree(c, payload.WorktreePath)
+			if err != nil {
+				return fail(stderr, err)
+			}
+			// The refusals stay: this is a different entry point, not a way
+			// around teardown. A non-zero exit shows stderr to the user, so
+			// the reason reaches them.
+			if err := task.Remove(c, name, false); err != nil {
+				return fail(stderr, err)
+			}
+			return 0
+
+		case "session-start":
+			// Regenerate this task's perimeter, since WorktreeCreate only
+			// fires for the tree being created and a sibling made since then
+			// is not named in this one's deny list (H16).
+			if err := requireContainer(c); err != nil {
+				return 0 // a session outside a container is not an error here
+			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				return 0
+			}
+			name, err := taskForTree(c, cwd)
+			if err != nil {
+				return 0
+			}
+			t, err := state.Load(c.StateDir(), name)
+			if err != nil {
+				return 0
+			}
+			names, _ := state.List(c.StateDir())
+			coverage, hashes, err := perimeter.Write(c, t, names)
+			if err != nil {
+				return 0
+			}
+			t.PerimeterCoverage, t.PerimeterHashes = coverage, hashes
+			_ = state.Save(c.StateDir(), t)
+			return 0
+		}
+		fmt.Fprint(stderr, usage)
+		return 2
 
 	case "doctor":
 		// Reconcile, and with --fix repair only what is unambiguous. Also the
@@ -600,4 +707,60 @@ func recordExclusions(c container.C, excluded map[string]bool) error {
 	}
 	sort.Strings(list)
 	return state.SaveContainer(c.ConfigDir(), state.Container{Excluded: list})
+}
+
+// taskForTree maps a worktree path back to the task that owns it. The payload
+// may spell the path any way — as typed, resolved, or the macOS /private
+// form — so this compares through every known spelling rather than by string
+// equality (spec §5.6).
+func taskForTree(c container.C, worktreePath string) (string, error) {
+	names, err := state.List(c.StateDir())
+	if err != nil {
+		return "", err
+	}
+	want := paths.Spellings(worktreePath)
+	for _, n := range names {
+		for _, have := range paths.Spellings(c.TreePath(n)) {
+			for _, w := range want {
+				if have == w {
+					return n, nil
+				}
+			}
+		}
+	}
+	return "", wkterr.New("WKT_NO_TASK", "no task owns that worktree path").
+		WithPath(worktreePath).
+		WithRemedy("wkt status lists the tasks this container knows about")
+}
+
+// printHookSettings emits the block to paste into ~/.claude/settings.json.
+// Printing beats writing: that file is the user's, and wkt has no business
+// editing it behind their back.
+func printHookSettings(stdout io.Writer) {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "wkt"
+	}
+	fmt.Fprintf(stdout, `Add this to ~/.claude/settings.json, then run "claude --worktree" from a
+workspace wkt has adopted. Claude Code will ask wkt for the worktree instead
+of calling git, so the session lands in a task tree covering every repository.
+
+{
+  "hooks": {
+    "WorktreeCreate": [
+      { "hooks": [ { "type": "command", "command": "%s hook worktree-create" } ] }
+    ],
+    "WorktreeRemove": [
+      { "hooks": [ { "type": "command", "command": "%s hook worktree-remove" } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "%s hook session-start" } ] }
+    ]
+  }
+}
+
+The SessionStart entry keeps a task's perimeter current: WorktreeCreate only
+fires for the tree being created, so a task made later is not named in an
+older task's deny list until something regenerates it.
+`, exe, exe, exe)
 }

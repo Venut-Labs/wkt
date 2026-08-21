@@ -1178,3 +1178,47 @@ func TestUserContentBesideThePerimeterStillBlocks(t *testing.T) {
 		t.Fatal("content beside the perimeter inside a repository must block too")
 	}
 }
+
+// TestClaudeCodeBookkeepingDoesNotBlockRemoval — Claude Code writes
+// .claude/.cc-writes into a tree the first time the agent edits a file.
+// Verified end to end against 2.1.238 through the worktree hooks: without
+// this exemption, every task a session actually worked in needed --force to
+// remove, which is the reflexive --force this whole check exists to avoid.
+func TestClaudeCodeBookkeepingDoesNotBlockRemoval(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-cc", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	root := c.TreePath("feat-cc")
+	if err := os.MkdirAll(filepath.Join(root, ".claude", ".cc-writes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".claude", ".cc-writes", "log.jsonl"),
+		[]byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-cc", false); err != nil {
+		t.Fatalf("Claude Code's own bookkeeping must not block removal: %v", err)
+	}
+}
+
+// TestUserFilesInsideDotClaudeStillBlock — the exemption is that one
+// directory, not all of .claude, which holds the user's agents and
+// instructions.
+func TestUserFilesInsideDotClaudeStillBlock(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-cc2", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	root := c.TreePath("feat-cc2")
+	if err := os.MkdirAll(filepath.Join(root, ".claude", "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".claude", "agents", "reviewer.md"),
+		[]byte("my agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove(c, "feat-cc2", false); err == nil {
+		t.Fatal("a file the user wrote inside .claude must still block removal")
+	}
+}

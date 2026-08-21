@@ -19,6 +19,14 @@ func TestIsRegenerable(t *testing.T) {
 		{"dist/", true},
 		{"services/svc-a/dist/app.js", true},
 		{"vendor/bundle/gems", true},
+		// Claude Code writes this into a tree the moment the agent edits a
+		// file; without it every hook-driven task needs --force to remove.
+		{".claude/.cc-writes", true},
+		{".claude/.cc-writes/2026-08-21.jsonl", true},
+		// The rest of .claude is the user's: agents, instructions, settings
+		// they wrote themselves.
+		{".claude/agents/reviewer.md", false},
+		{".claude/CLAUDE.md", false},
 		{".env", false},
 		{"server.key", false},
 		{"src/main.go", false},

@@ -23,6 +23,12 @@ var regenerable = [][]string{
 	// case it was just fixed to catch.
 	{".DS_Store"}, {"Thumbs.db"}, {".Spotlight-V100"}, {".fseventsd"},
 	{".Trashes"}, {"desktop.ini"},
+	// Claude Code's own bookkeeping inside a task tree. It appears the
+	// first time the agent writes a file, so without this entry every task
+	// driven through the worktree hooks needs --force to remove — verified
+	// end to end against 2.1.238. Only this one path: the rest of .claude/
+	// may hold the user's agents and instructions, and those are work.
+	{".claude", ".cc-writes"},
 }
 
 // IsRegenerable reports whether a workspace-relative path is build output or
