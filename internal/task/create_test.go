@@ -571,3 +571,100 @@ func TestWorktreeAddFailureCarriesGitsReason(t *testing.T) {
 		t.Fatal("a failed create must roll back its tree")
 	}
 }
+
+// TestCreateCarriesGitignoredFiles — reported as issue #3. The design scopes
+// in a gitignored-file carry and it did not exist, so a fresh tree had no
+// .env and no way to get one: every new task started unable to run anything
+// that needs local configuration.
+func TestCreateCarriesGitignoredFiles(t *testing.T) {
+	c, entries := fixture(t)
+	repo := filepath.Join(c.Workspace, "docs")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore .env")
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("TOKEN=local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Workspace, ".wktinclude"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := Create(c, entries, "feat-carry", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carried := filepath.Join(task.Repos[0].WorktreePath, ".env")
+	body, err := os.ReadFile(carried)
+	if err != nil {
+		t.Fatalf("the tree must have the file the service needs: %v", err)
+	}
+	if string(body) != "TOKEN=local\n" {
+		t.Fatalf("contents: %q", body)
+	}
+	// Recorded, so teardown can tell it apart from work.
+	var slot *state.LinkSlot
+	for i := range task.Links {
+		if strings.HasSuffix(task.Links[i].RelPath, ".env") {
+			slot = &task.Links[i]
+		}
+	}
+	if slot == nil || slot.Type != "carry" || slot.Hash == "" {
+		t.Fatalf("a carried file must be recorded with its hash: %+v", task.Links)
+	}
+}
+
+// TestAnUntouchedCarriedFileDoesNotBlockRemoval — the copy is identical to the
+// developer's own, so removing the tree loses nothing and refusing would make
+// --force reflexive for every task that carries a secret.
+func TestAnUntouchedCarriedFileDoesNotBlockRemoval(t *testing.T) {
+	c, entries := fixture(t)
+	repo := filepath.Join(c.Workspace, "docs")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore .env")
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("TOKEN=local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Workspace, ".wktinclude"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(c, entries, "feat-untouched", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Remove(c, "feat-untouched", false); err != nil {
+		t.Fatalf("an untouched carried file must not block removal: %v", err)
+	}
+}
+
+// TestAnEditedCarriedFileBlocksRemoval — the other half. Once the task has
+// changed it, the copy holds something the developer's own file does not.
+func TestAnEditedCarriedFileBlocksRemoval(t *testing.T) {
+	c, entries := fixture(t)
+	repo := filepath.Join(c.Workspace, "docs")
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "ignore .env")
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("TOKEN=local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Workspace, ".wktinclude"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	task, err := Create(c, entries, "feat-edited", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task.Repos[0].WorktreePath, ".env"),
+		[]byte("TOKEN=changed-in-the-task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Remove(c, "feat-edited", false); err == nil {
+		t.Fatal("a carried file the task edited must block removal")
+	}
+}

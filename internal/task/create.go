@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Venut-Labs/wkt/internal/carry"
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/discover"
 	"github.com/Venut-Labs/wkt/internal/gitx"
@@ -270,6 +271,30 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 		WorkspaceSpellings: paths.Spellings(c.Workspace),
 		BaseEpoch:          time.Now().UTC(),
 		Repos:              repos, Links: slots,
+	}
+
+	// The gitignored-file carry (spec §1.1): a worktree is a fresh checkout,
+	// so a service that needs a local .env cannot run in a new tree until one
+	// arrives. Carried files are recorded as copy slots, so teardown can tell
+	// an untouched copy — which loses nothing when the tree goes — from one
+	// the task edited, which does.
+	carryPlan, err := carry.Plan(c.Workspace, repos)
+	if err != nil {
+		rollback()
+		return state.Task{}, err
+	}
+	carried, err := carry.Apply(treeRoot, c.Workspace, carryPlan)
+	if err != nil {
+		rollback()
+		return state.Task{}, err
+	}
+	for _, f := range carried {
+		t.Links = append(t.Links, state.LinkSlot{
+			RelPath: f.RelPath,
+			Target:  filepath.Join(c.Workspace, filepath.FromSlash(f.RelPath)),
+			Type:    "carry",
+			Hash:    f.Hash,
+		})
 	}
 
 	// The perimeter is written before the state that describes it, and its

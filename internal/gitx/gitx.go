@@ -27,6 +27,27 @@ func Run(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
+// RunStdin is Run with input on stdin, for the git commands that read a list
+// of paths that way rather than as arguments — which is also how they avoid
+// the argument-length limit on a large repository.
+func RunStdin(dir, stdin string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		stderr := strings.TrimSpace(errb.String())
+		if stderr == "" {
+			stderr = err.Error()
+		}
+		return out.String(), wkterr.New("WKT_GIT_FAILED", "git "+args[0]+" failed").
+			WithPath(dir).WithFound(firstUsefulLine(stderr))
+	}
+	return out.String(), nil
+}
+
 func RunOK(dir string, args ...string) bool {
 	_, err := Run(dir, args...)
 	return err == nil

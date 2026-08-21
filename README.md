@@ -89,6 +89,24 @@ detected, `4` no container (run `init`), `1` any other typed failure. Errors
 are one line of JSON on stderr; a refusal that has several causes lists them
 under `problems` (what is in the way), with `remedy` reserved for what to do.
 
+## Carrying local files into a task
+
+A worktree is a fresh checkout, so a task tree starts without the gitignored
+files a service needs to run. Name them in a `.wktinclude` at the workspace
+root, in gitignore syntax:
+
+```
+.env
+.env.local
+services/*/config/secrets.json
+```
+
+A file is carried only if a pattern matches it **and** git already ignores it,
+so the mechanism can never shadow versioned content. Files are copied, never
+linked: editing a symlinked secret inside a task would write back into your own
+checkout. A carried file that the task has not changed does not block removal;
+one it has changed does.
+
 ## With Claude Code
 
 `claude --worktree` normally cuts a worktree from the one repository the

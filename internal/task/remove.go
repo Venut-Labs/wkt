@@ -78,6 +78,13 @@ func ownedByWkt(c container.C, t state.Task) map[string]bool {
 
 func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 	perimeterOwned := ownedByWkt(c, t)
+	// Files wkt carried into the tree, by their tree-relative path.
+	carried := map[string]string{}
+	for _, l := range t.Links {
+		if l.Type == "carry" {
+			carried[filepath.Clean(filepath.FromSlash(l.RelPath))] = l.Hash
+		}
+	}
 	var out []Blocker
 	treeRoot := c.TreePath(t.Name)
 
@@ -113,6 +120,16 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 				rel := strings.TrimPrefix(line, "!! ")
 				if artifact.IsRegenerable(rel) {
 					out = append(out, Blocker{Code: "WKT_REGENERABLE_IGNORED", Repo: r.RelPath, Path: rel, Severity: "info"})
+					continue
+				}
+				// A file wkt carried in, still identical to the developer's
+				// own copy, loses nothing when the tree goes. Blocking on it
+				// would make --force reflexive for every task that carries a
+				// .env — which is the habit this whole check exists to avoid.
+				// Once the task has edited it, it holds something their file
+				// does not, and section 8's copy check blocks on it.
+				if carriedUnchanged(carried, filepath.Join(r.RelPath, rel), filepath.Join(wt, rel)) {
+					out = append(out, Blocker{Code: "WKT_CARRIED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
 				out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: rel})
@@ -730,4 +747,15 @@ func keepUnpushed(storePath string, r state.Repo, task string) (Kept, bool) {
 		return Kept{}, false
 	}
 	return Kept{Repo: r.RelPath, Store: storePath, Ref: ref, SHA: tip}, true
+}
+
+// carriedUnchanged reports whether this ignored path is a file wkt carried in
+// that still matches what it copied.
+func carriedUnchanged(carried map[string]string, treeRel, abs string) bool {
+	want, ok := carried[filepath.Clean(treeRel)]
+	if !ok || want == "" {
+		return false
+	}
+	got, err := tree.Hash(abs)
+	return err == nil && got == want
 }

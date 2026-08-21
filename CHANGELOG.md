@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **The gitignored-file carry exists** (issue #3). The design scoped it in —
+  "there is a `post-create` seam and a gitignored-file carry, and nothing
+  else" — and it was never built, so a fresh tree had no `.env` and no way to
+  get one. Name the files in a `.wktinclude` at the workspace root, in
+  gitignore syntax; a file is carried only if a pattern matches it **and** git
+  already ignores it. Copies, never links, and the mode is preserved. The
+  matching is git's own — the patterns are handed to git as an excludes file —
+  so the syntax is not an approximation of gitignore, it is gitignore.
+- Teardown tells a carried file apart from work: one the task never changed
+  loses nothing when the tree goes and does not block removal; one it edited
+  does.
+
 ## v0.4.2 — 2026-08-21
 
 The perimeter made task trees unusable: nothing could be built in one, and
