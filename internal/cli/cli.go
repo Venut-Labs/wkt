@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/Venut-Labs/wkt/internal/perimeter"
 	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/task"
+	"github.com/Venut-Labs/wkt/internal/tree"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
@@ -192,11 +194,30 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				"or adopt the workspace without it: wkt init --exclude "+stillNested[0][0]))
 		}
 		repoCount := 0
+		known := map[string]bool{}
 		for _, e := range entries {
 			if e.Kind == discover.KindRepo {
 				fmt.Fprintln(stdout, e.RelPath)
+				known[e.RelPath] = true
 				repoCount++
 			}
+		}
+
+		// A repository deeper than the discovery bound makes its containing
+		// directory unlinkable: wkt refuses to share it writably with every
+		// task (spec §5.3 rule 4). That refusal arrives at "wkt new", one
+		// command after the one that walked the workspace — so warn here,
+		// where the user is still deciding what this workspace looks like.
+		var linkCandidates []string
+		if ents, err := os.ReadDir(c.Workspace); err == nil {
+			for _, e := range ents {
+				if e.IsDir() && !known[e.Name()] {
+					linkCandidates = append(linkCandidates, filepath.Join(c.Workspace, e.Name()))
+				}
+			}
+		}
+		for _, hidden := range tree.HiddenRepos(linkCandidates) {
+			fmt.Fprintf(stderr, "warning: WKT_REPO_BELOW_BOUND %s lies deeper than the discovery bound; wkt new will refuse to link the directory above it rather than share that repository with every task\n", hidden)
 		}
 		if repoCount == 0 {
 			return fail(stderr, wkterr.New("WKT_NO_REPOS", "no repositories were found under the workspace").

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/paths"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
@@ -74,23 +75,53 @@ func Create(c C) error {
 	return nil
 }
 
-func Lock(c C) (func(), error) {
+// DefaultLockWait is how long a command waits for another wkt process to
+// finish before giving up. The whole premise is two agents working at once,
+// and set-level operations here take well under a second, so a caller that
+// arrives mid-command should queue rather than fail — but never forever: a
+// stale holder must be reported, not hung on.
+const DefaultLockWait = 10 * time.Second
+
+// Lock takes the container lock, waiting up to DefaultLockWait.
+func Lock(c C) (func(), error) { return LockFor(c, DefaultLockWait) }
+
+// LockFor is Lock with an explicit deadline. A zero wait is the old
+// fail-immediately behaviour, which is what a test wants when it is checking
+// that the lock excludes at all.
+func LockFor(c C, wait time.Duration) (func(), error) {
 	path := filepath.Join(c.Root, ".wkt.lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, wkterr.New("WKT_CONTAINER_UNUSABLE", "cannot open the container lock").
 			WithPath(path).WithFound(err.Error())
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		holder, _ := os.ReadFile(path)
-		_ = f.Close()
-		return nil, wkterr.New("WKT_LOCKED", "another wkt process holds the container lock").
-			WithPath(path).WithFound(string(holder)).
-			WithRemedy("wait for it to finish", "or remove the lock file if no wkt process is running")
+
+	deadline := time.Now().Add(wait)
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			holder, _ := os.ReadFile(path)
+			_ = f.Close()
+			return nil, wkterr.New("WKT_LOCKED", "another wkt process holds the container lock").
+				WithPath(path).WithFound(string(holder)).
+				WithRemedy("wait for it to finish",
+					"or remove the lock file if no wkt process is running")
+		}
+		// Poll rather than blocking in flock: a blocking flock cannot be
+		// given a deadline without signals, and 50ms of latency is nothing
+		// against commands that take a second.
+		time.Sleep(50 * time.Millisecond)
 	}
+
 	_ = f.Truncate(0)
 	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
 	return func() {
+		// Unlock and close, but never unlink: a party that opened the path
+		// before an unlink would hold a lock on an orphaned inode while the
+		// next Lock locked a freshly created one.
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil

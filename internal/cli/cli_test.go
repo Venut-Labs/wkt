@@ -1393,3 +1393,56 @@ func TestHookInstallPrintsSomethingUsable(t *testing.T) {
 		t.Fatalf("the printed block must be valid JSON: %v\n%s", err, blob)
 	}
 }
+
+// TestInitWarnsAboutARepositoryBelowTheDiscoveryBound covers live-run finding
+// L4. A repository deeper than the discovery depth makes its containing
+// directory unlinkable (spec §5.3 rule 4 — it must not be shared writable by
+// every task), so init succeeds and new then refuses. The user learns one
+// command too late, and init is the command that already walks the workspace.
+func TestInitWarnsAboutARepositoryBelowTheDiscoveryBound(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	// Depth 5: past the default bound of 4.
+	deep := filepath.Join(ws, "notes", "one", "two", "three", "hidden-repo")
+	seedRepo(t, deep)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"init", "--workspace", ws}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("init must still adopt the workspace, exited %d: %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_REPO_BELOW_BOUND") {
+		t.Fatalf("init must warn about the repository new will refuse over:\n%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "hidden-repo") {
+		t.Fatalf("the warning must name it:\n%s", errb.String())
+	}
+
+	// And the warning is honest about what happens next.
+	out.Reset()
+	if code := Run([]string{"new", "t1", "--all", "--workspace", ws}, &out, &errb); code == 0 {
+		t.Fatal("precondition: new should refuse to link a directory hiding a repository")
+	}
+}
+
+// TestInitIsQuietWhenThereIsNothingToWarnAbout — a warning that always fires
+// is noise, and this one has to stay rare enough to read.
+func TestInitIsQuietWhenThereIsNothingToWarnAbout(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	if err := os.MkdirAll(filepath.Join(ws, "notes", "deep", "deeper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "notes", "deep", "deeper", "x.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	if strings.Contains(errb.String(), "WKT_REPO_BELOW_BOUND") {
+		t.Fatalf("nothing here is below the bound:\n%s", errb.String())
+	}
+}

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- A command now **waits** for another wkt process to finish (up to 10s) instead
+  of failing outright the moment their runs overlap. The whole premise is two
+  agents working at once, and a set-level operation takes well under a second.
+- **Large loose files are linked, not copied.** Copying is right for the files a
+  task edits and wrong for the ones it only reads: the first real workspace this
+  ran against had 19 slide images in an ancestor directory, and every task
+  copied all of them. Above 1 MiB the file appears in the tree as a link.
+- `wkt init` **warns about a repository deeper than the discovery bound**. Such
+  a repository makes its containing directory unlinkable — wkt will not share it
+  writably with every task — and that refusal used to arrive at the first
+  `wkt new`, one command after the one that walked the workspace.
+
 - **Claude Code worktree hooks.** `wkt hook install` prints the settings block;
   after that `claude --worktree` in a multi-repo workspace produces a wkt task
   tree instead of a single repository's worktree. Re-firing the event returns

@@ -20,6 +20,12 @@ import (
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
+// MaxCopyBytes is where a loose file stops being copied into every task and
+// starts being linked. Chosen to sit above source files, notes and scripts —
+// the things a task actually edits — and below the media and datasets that
+// happen to share a directory with them.
+const MaxCopyBytes = 1 << 20 // 1 MiB
+
 type Plan struct {
 	Materialise []string // repositories that become real worktrees
 	BackFill    []string // repositories present only as symlinks to the workspace
@@ -127,6 +133,15 @@ func planDir(workspace, dirRel string, repoPaths, ancestors map[string]bool, p *
 			return wkterr.New("WKT_WORKSPACE_UNREADABLE", "cannot inspect a workspace entry").WithPath(filepath.Join(abs, name))
 		case info.Mode()&os.ModeSymlink != 0, info.IsDir():
 			p.LinkDirs = append(p.LinkDirs, relSlash)
+		case info.Size() > MaxCopyBytes:
+			// Copying is right for the files a task edits, and wrong for the
+			// ones it only reads. The first real workspace this ran against
+			// had 19 slide PNGs in an ancestor directory, and every task
+			// copied all of them; a directory of datasets would be copied
+			// whole, per task. Above the threshold the file is linked
+			// instead — visible from the tree, edited only through a path
+			// the perimeter denies, and checked at teardown as a link slot.
+			p.LinkDirs = append(p.LinkDirs, relSlash)
 		case artifact.IsRegenerable(relSlash):
 			// An OS artifact (.DS_Store and friends) carries no work and is
 			// rewritten by the file manager on its own. Copying it in makes
@@ -225,6 +240,20 @@ func Materialise(treeRoot, workspace string, p Plan) ([]state.LinkSlot, error) {
 // repository directory found, or "" if none. An unreadable subtree is
 // skipped, not treated as a scan failure — the same convention
 // discover.Walk already uses for repository enumeration.
+// HiddenRepos reports repositories that live below dir but were never
+// discovered, which is what makes a directory unlinkable (spec §5.3 rule 4).
+// init uses it to warn while the workspace is still being adopted, rather
+// than letting the first "wkt new" be where the user finds out.
+func HiddenRepos(dirs []string) []string {
+	var out []string
+	for _, d := range dirs {
+		if found := findNestedRepo(d); found != "" {
+			out = append(out, found)
+		}
+	}
+	return out
+}
+
 func findNestedRepo(dir string) string {
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {

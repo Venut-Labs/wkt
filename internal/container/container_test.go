@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/paths"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
@@ -104,7 +105,7 @@ func TestLockIsExclusive(t *testing.T) {
 	}
 	inode1 := info1.Sys().(*syscall.Stat_t).Ino
 
-	if _, err := Lock(c); err == nil {
+	if _, err := LockFor(c, 0); err == nil {
 		release()
 		t.Fatal("a second lock must fail while the first is held")
 	}
@@ -127,4 +128,64 @@ func TestLockIsExclusive(t *testing.T) {
 	}
 
 	release2()
+}
+
+// TestLockWaitsForTheHolder covers finding F7. The tool's premise is two
+// agents working at once, and LOCK_NB with no wait made the second one fail
+// outright whenever their commands happened to overlap — correct, but
+// abrasive, and a failure the caller cannot do anything useful about.
+func TestLockWaitsForTheHolder(t *testing.T) {
+	base := t.TempDir()
+	c := C{Root: filepath.Join(base, "c"), Workspace: base}
+	if err := Create(c); err != nil {
+		t.Fatal(err)
+	}
+	release, err := Lock(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold it briefly, then let go, as a short wkt command would.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		release()
+	}()
+
+	// Lock, not LockFor: the point is that the entry point every command
+	// uses waits. A test that calls LockFor here passes against a Lock that
+	// still fails immediately.
+	start := time.Now()
+	second, err := Lock(c)
+	if err != nil {
+		t.Fatalf("the second caller must wait rather than fail: %v", err)
+	}
+	defer second()
+	if waited := time.Since(start); waited < 100*time.Millisecond {
+		t.Fatalf("it returned in %v, so it cannot have waited for the holder", waited)
+	}
+}
+
+// TestLockGivesUpEventually — waiting forever would be its own bug: a stale
+// holder would hang every later command with no way to tell what is wrong.
+func TestLockGivesUpEventually(t *testing.T) {
+	base := t.TempDir()
+	c := C{Root: filepath.Join(base, "c"), Workspace: base}
+	if err := Create(c); err != nil {
+		t.Fatal(err)
+	}
+	release, err := Lock(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	start := time.Now()
+	if _, err := LockFor(c, 200*time.Millisecond); err == nil {
+		t.Fatal("a lock that is never released must eventually be reported")
+	} else if e, ok := err.(*wkterr.E); !ok || e.Code != "WKT_LOCKED" {
+		t.Fatalf("want WKT_LOCKED, got %v", err)
+	}
+	if waited := time.Since(start); waited > 3*time.Second {
+		t.Fatalf("it waited %v, far past the deadline it was given", waited)
+	}
 }

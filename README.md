@@ -114,6 +114,9 @@ Code shows it to you.
   dependency installation are out of scope.
 - **A task over a repository with submodules cannot be removed** until the
   submodule is deinitialised — `new` warns when it sees one.
+- **Loose files over 1 MiB are linked into the tree rather than copied**, so a
+  directory of images or datasets is not duplicated per task. Small files are
+  still copied, and a diverged copy blocks teardown.
 
 ## License
 

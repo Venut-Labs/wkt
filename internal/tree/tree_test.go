@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
@@ -446,5 +447,69 @@ func TestOSArtifactsAreNotCopiedIntoTheTree(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(treeRoot, ".DS_Store")); !os.IsNotExist(err) {
 		t.Fatal("the tree must not carry a copied .DS_Store")
+	}
+}
+
+// TestLargeLooseFilesAreLinkedNotCopied covers live-run finding L1. Copying
+// loose files is right for the things a task edits — a CONVENTIONS.md, a
+// script — but the first real workspace this ran against had 19 slide PNGs in
+// an ancestor directory, and every task copied all of them. A directory of
+// datasets or video would be copied whole, per task.
+func TestLargeLooseFilesAreLinkedNotCopied(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	small := []byte("# conventions\n")
+	if err := os.WriteFile(filepath.Join(ws, "CONVENTIONS.md"), small, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, MaxCopyBytes+1)
+	if err := os.WriteFile(filepath.Join(ws, "slides.pdf"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := PlanFor(ws, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(p.CopyFiles, "CONVENTIONS.md") {
+		t.Fatalf("a small loose file must still be copied: %+v", p)
+	}
+	if contains(p.CopyFiles, "slides.pdf") {
+		t.Fatalf("a large loose file must not be copied into every task: %+v", p)
+	}
+	if !contains(p.LinkDirs, "slides.pdf") {
+		t.Fatalf("it must still appear in the tree, as a link: %+v", p)
+	}
+
+	treeRoot := filepath.Join(base, "tree")
+	if err := os.MkdirAll(treeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slots, err := Materialise(treeRoot, ws, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(treeRoot, "slides.pdf"))
+	if err != nil {
+		t.Fatalf("the large file must be reachable from the tree: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the large file should be a link, not a copy")
+	}
+	var slot state.LinkSlot
+	for _, s := range slots {
+		if s.RelPath == "slides.pdf" {
+			slot = s
+		}
+	}
+	if slot.Type != "symlink" {
+		t.Fatalf("state must record it as a link so teardown checks the right thing: %+v", slot)
+	}
+	// And the tree must be cheap: the copy is what cost megabytes per task.
+	if st, err := os.Stat(treeRoot); err == nil {
+		_ = st
 	}
 }
