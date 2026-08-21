@@ -16,6 +16,7 @@ import (
 
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/doctor"
 	"github.com/Venut-Labs/wkt/internal/gitx"
 	"github.com/Venut-Labs/wkt/internal/perimeter"
 	"github.com/Venut-Labs/wkt/internal/state"
@@ -31,6 +32,7 @@ const usage = `wkt — one task, one branch, many repositories
   wkt status [TASK] [--workspace DIR]
   wkt rm     TASK [--workspace DIR] [--force]               (alias: cleanup)
   wkt perimeter [TASK] [--workspace DIR] [--check]
+  wkt doctor [--workspace DIR] [--fix] [--all]
   wkt version
 `
 
@@ -65,11 +67,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var ws, repos, exclude *string
-	var all, force, dryRun, check *bool
+	var all, force, dryRun, check, fix *bool
 	nul := func() *string { v := ""; return &v }
 	nulB := func() *bool { v := false; return &v }
 	ws, repos, exclude = nul(), nul(), nul()
-	all, force, dryRun, check = nulB(), nulB(), nulB(), nulB()
+	all, force, dryRun, check, fix = nulB(), nulB(), nulB(), nulB(), nulB()
 
 	ws = fs.String("workspace", ".", "workspace directory")
 	switch cmd {
@@ -81,6 +83,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		all = fs.Bool("all", false, "select every discovered repository")
 	case "rm":
 		force = fs.Bool("force", false, "remove even though work would be lost")
+	case "doctor":
+		fix = fs.Bool("fix", false, "repair what is unambiguous")
+		all = fs.Bool("all", false, "also list what wkt wrote on purpose")
 	case "perimeter":
 		check = fs.Bool("check", false, "report without writing anything")
 	}
@@ -236,6 +241,41 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2
 		}
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
+		return 0
+
+	case "doctor":
+		// Reconcile, and with --fix repair only what is unambiguous. Also the
+		// uninstall path: --all lists every ref wkt has written into the
+		// user's own repositories, whether or not it is a problem, because a
+		// tool that writes into someone else's repository has to be able to
+		// answer that completely.
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		findings, err := doctor.Run(c, *fix)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		problems := 0
+		for _, f := range findings {
+			if f.Info && !*all {
+				continue
+			}
+			marker := "!"
+			switch {
+			case f.Fixed:
+				marker = "fixed"
+			case f.Info:
+				marker = "i"
+			}
+			fmt.Fprintf(stdout, "  %-5s %-20s %s\n    %s\n", marker, f.Code, f.Path, f.Detail)
+			if !f.Info && !f.Fixed {
+				problems++
+			}
+		}
+		if problems > 0 {
+			return 3
+		}
 		return 0
 
 	case "perimeter":

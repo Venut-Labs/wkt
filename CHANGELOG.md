@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `wkt doctor` — reconciles state against the disk: tasks whose tree is gone,
+  directories in `trees/` that no task claims, and base pins left in your
+  repositories by tasks that no longer exist. `--fix` repairs only what is
+  unambiguous and never removes anything that could hold work. `--all` lists
+  every `refs/wkt/*` wkt has written into your own repositories, which is the
+  answer you need before deciding to keep the tool.
+
 ## v0.1.1 — 2026-08-21
 
 - `wkt version` now reports the tag a `go install github.com/Venut-Labs/wkt/cmd/wkt@v0.1.1`

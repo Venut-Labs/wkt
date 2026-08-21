@@ -1189,3 +1189,50 @@ func TestVersionVerb(t *testing.T) {
 		t.Fatal("usage must document the version verb")
 	}
 }
+
+// TestDoctorReportsAndFixes — the verb's contract at the CLI seam: quiet on a
+// healthy container, exit 3 on a problem, and --all lists what wkt wrote on
+// purpose, which is the uninstall inventory.
+func TestDoctorReportsAndFixes(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	out.Reset()
+	if code := Run([]string{"doctor", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("a healthy container must exit 0, got %d:\n%s", code, out.String())
+	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("a healthy container must be quiet, got:\n%s", out.String())
+	}
+
+	// --all is the uninstall answer: it names the ref wkt put in the repo.
+	out.Reset()
+	if code := Run([]string{"doctor", "--all", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("--all must not turn information into failure, got %d", code)
+	}
+	if !strings.Contains(out.String(), "refs/wkt/base/t1") {
+		t.Fatalf("--all must list what wkt wrote into the workspace:\n%s", out.String())
+	}
+
+	// A problem: debris in trees/ that no task claims.
+	orphan := filepath.Join(containerOf(t, ws), "trees", "leftover")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"doctor", "--workspace", ws}, &out, &errb); code != 3 {
+		t.Fatalf("a problem must exit 3, got %d:\n%s", code, out.String())
+	}
+
+	out.Reset()
+	if code := Run([]string{"doctor", "--fix", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("--fix must clear it, got %d:\n%s", code, out.String())
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatal("--fix must remove the empty leftover")
+	}
+}

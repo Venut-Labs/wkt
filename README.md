@@ -65,7 +65,16 @@ cd "$(wkt path feat-42)"               # work here
 wkt status                             # what exists, and what has drifted
 wkt rm feat-42                         # refuses while anything would be lost
 wkt rm feat-42 --force                 # override, behind a staging fence
+
+wkt perimeter --check                  # is each task's perimeter current?
+wkt doctor                             # does state still match the disk?
+wkt doctor --all                       # everything wkt has written into your repositories
 ```
+
+`wkt doctor --all` is also the uninstall answer. wkt writes exactly one thing
+into a repository of yours — a base pin under `refs/wkt/` — and `doctor` lists
+every one of them, whether or not it is a problem, so trying the tool is not a
+one-way door.
 
 `init` refuses a genuine nested repository; `--exclude services/svc-a/vendored`
 adopts the workspace without it and records the decision.
