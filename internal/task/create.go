@@ -222,8 +222,12 @@ func Create(c container.C, entries []discover.Entry, name string, selected []str
 		undos = append(undos, func() { _, _ = gitx.Run(storePath, "branch", "-D", name) })
 		if _, err := gitx.Run(sp, "worktree", "add", "-q", "-b", name, r.WorktreePath, r.BaseSHA); err != nil {
 			rollback()
+			// Carry git's own reason. Without it a repository whose checkout
+			// runs a content filter — git-lfs is the common one — fails with
+			// nothing but "cannot create the worktree", and the person has no
+			// way to learn that a filter is what stopped it.
 			return state.Task{}, wkterr.New("WKT_WORKTREE_ADD", "cannot create the worktree").
-				WithRepo(r.RelPath).WithPath(r.WorktreePath)
+				WithRepo(r.RelPath).WithPath(r.WorktreePath).WithFound(err.Error())
 		}
 		undos = append(undos, func() {
 			// Force twice: a single --force removes a dirty worktree but still

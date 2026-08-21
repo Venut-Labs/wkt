@@ -506,3 +506,68 @@ func TestRollbackTakesThePerimeterWithIt(t *testing.T) {
 		t.Fatal("the tree, and with it every perimeter copy, must be gone")
 	}
 }
+
+// TestWorktreeAddFailureCarriesGitsReason — a checkout that runs a content
+// filter fails inside "worktree add", and wkt used to report only "cannot
+// create the worktree", with git's explanation thrown away. That is the
+// git-lfs shape: "git lfs install" writes filter.lfs.* into the *global*
+// config, which the store does see, while the object cache it needs does not
+// come with the store.
+func TestWorktreeAddFailureCarriesGitsReason(t *testing.T) {
+	c, entries := fixture(t)
+
+	// A required filter in global config, failing the way git-lfs does when it
+	// cannot produce the object. Local config would not reproduce this: wkt
+	// deliberately never copies filter.* into the store.
+	// Commit the filtered path first, with no filter configured: the file is
+	// already in history by the time the developer installs the tool that
+	// filters it. (Configuring it first fails the *clean* step instead, which
+	// is a different failure and not the one under test.)
+	repo := filepath.Join(c.Workspace, "docs")
+	if err := os.MkdirAll(filepath.Join(repo, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("assets/*.bin filter=leaky\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "assets", "big.bin"), []byte("pretend this is large\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "track a filtered path")
+
+	// Now the filter exists, in global config — which is where "git lfs
+	// install" puts it, and which the store does see. Only a smudge driver,
+	// so this fails on checkout, exactly as git-lfs does when it cannot fetch
+	// the objects.
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalCfg, []byte(
+		"[filter \"leaky\"]\n"+
+			"\tsmudge = sh -c 'echo fetching objects >&2; exit 3' --token=glpat-SECRET %f\n"+
+			"\trequired = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+
+	_, err := Create(c, entries, "feat-filter", []string{"docs"})
+	if err == nil {
+		t.Fatal("a required filter that cannot run must fail the checkout, not produce a silent tree")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) {
+		t.Fatalf("want a typed error, got %v", err)
+	}
+	if e.Found == "" {
+		t.Fatalf("the failure must carry git's reason, or nobody can tell a filter from a path collision: %+v", e)
+	}
+	if !strings.Contains(e.Found, "filter") {
+		t.Fatalf("git named a filter; the error must say so: %+v", e)
+	}
+	if strings.Contains(e.Found, "glpat-SECRET") {
+		t.Fatalf("and must not carry the user's secrets with it: %+v", e)
+	}
+	// The failed create still leaves nothing behind.
+	if _, statErr := os.Stat(c.TreePath("feat-filter")); !os.IsNotExist(statErr) {
+		t.Fatal("a failed create must roll back its tree")
+	}
+}

@@ -1,6 +1,8 @@
 package gitx
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,5 +80,90 @@ func TestParseVersion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestFirstUsefulLine covers what wkt shows a user when git fails.
+//
+// Measured against real git 2.50 (a required smudge filter that exits 3):
+//
+//	fetching objects                                       <- the filter's own noise
+//	error: external filter 'sh -c '…' --token=glpat-…' failed 3
+//	error: external filter 'sh -c '…' --token=glpat-…' failed
+//	fatal: f.txt: smudge filter leaky failed               <- the only useful line
+//
+// Taking the first line — which is what wkt did — reports the filter's progress
+// message and never says the words "filter" or "smudge". Taking the error line
+// instead would echo the configured command, tokens included. Prefer fatal.
+func TestFirstUsefulLine(t *testing.T) {
+	const cmd = "sh -c 'echo fetching objects >&2; exit 3' --token=glpat-SECRET123 %f"
+	for name, tc := range map[string]struct{ in, want string }{
+		"prefers fatal over filter noise": {
+			in: "fetching objects\n" +
+				"error: external filter '" + cmd + "' failed 3\n" +
+				"error: external filter '" + cmd + "' failed\n" +
+				"fatal: f.txt: smudge filter leaky failed\n",
+			want: "fatal: f.txt: smudge filter leaky failed",
+		},
+		"redacts the command when there is no fatal line": {
+			// A clean filter with required=false produces exactly this and
+			// nothing else — measured.
+			in:   "error: external filter '" + cmd + "' failed 3\n",
+			want: "error: external filter '<configured command withheld>' failed 3",
+		},
+		"ordinary usage error is unchanged": {
+			in:   "error: unknown option `nonexistent-flag'\nusage: git checkout ...\n",
+			want: "error: unknown option `nonexistent-flag'",
+		},
+		"a fatal line further down still wins": {
+			in:   "warning: something\nfatal: the real reason\n",
+			want: "fatal: the real reason",
+		},
+		"empty": {in: "", want: ""},
+	} {
+		if got := firstUsefulLine(tc.in); got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", name, got, tc.want)
+		}
+	}
+}
+
+// TestRunNeverEchoesAConfiguredFilterCommand drives it through real git,
+// because the string git actually emits is the thing under test.
+func TestRunNeverEchoesAConfiguredFilterCommand(t *testing.T) {
+	dir := t.TempDir()
+	mustRun := func(args ...string) {
+		t.Helper()
+		if _, err := Run(dir, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	mustRun("init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("* filter=leaky\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("add", "-A")
+	mustRun("-c", "user.email=e@x", "-c", "user.name=t", "commit", "-qm", "init")
+	mustRun("config", "filter.leaky.smudge", "sh -c 'echo fetching objects >&2; exit 3' --token=glpat-SECRET123 %f")
+	mustRun("config", "filter.leaky.required", "true")
+	if err := os.Remove(filepath.Join(dir, "f.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Run(dir, "checkout", "--", "f.txt")
+	if err == nil {
+		t.Fatal("a required filter that exits non-zero must fail the checkout")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "glpat-SECRET123") {
+		t.Fatalf("the error echoes a secret out of the user's git config: %q", msg)
+	}
+	if strings.Contains(msg, "fetching objects") {
+		t.Fatalf("the error reports the filter's progress noise instead of the cause: %q", msg)
+	}
+	if !strings.Contains(msg, "filter") {
+		t.Fatalf("the error must name what actually failed: %q", msg)
 	}
 }

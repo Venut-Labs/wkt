@@ -232,3 +232,56 @@ func TestAddRefusesWhenTheEpochPredatesTheRepository(t *testing.T) {
 		t.Fatalf("want WKT_BASE_UNREACHABLE, got %v", err)
 	}
 }
+
+// TestAddWorktreeFailureCarriesGitsReason — add builds a worktree the same way
+// create does, so it fails the same way on a content filter, and it threw
+// git's explanation away just as create did. A defect fixed at one of two
+// identical sites is a defect that comes back.
+func TestAddWorktreeFailureCarriesGitsReason(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-addfilter", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := filepath.Join(c.Workspace, "services", "svc-a")
+	if err := os.MkdirAll(filepath.Join(repo, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("assets/*.bin filter=leaky\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "assets", "big.bin"), []byte("pretend this is large\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, repo, "add", "-A")
+	g(t, repo, "commit", "-qm", "track a filtered path")
+
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalCfg, []byte(
+		"[filter \"leaky\"]\n"+
+			"\tsmudge = sh -c 'echo fetching objects >&2; exit 3' --token=glpat-SECRET %f\n"+
+			"\trequired = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+
+	err := Add(c, entries, "feat-addfilter", "services/svc-a")
+	if err == nil {
+		t.Fatal("a required filter that cannot run must fail the add")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) {
+		t.Fatalf("want a typed error, got %v", err)
+	}
+	if e.Found == "" || !strings.Contains(e.Found, "filter") {
+		t.Fatalf("add must carry git's reason too: %+v", e)
+	}
+	if strings.Contains(e.Found, "glpat-SECRET") {
+		t.Fatalf("and must not carry the user's secrets: %+v", e)
+	}
+	// And the back-fill link is back where it was.
+	at := filepath.Join(c.TreePath("feat-addfilter"), "services", "svc-a")
+	if info, statErr := os.Lstat(at); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the refused add must restore the back-fill link: %v", statErr)
+	}
+}

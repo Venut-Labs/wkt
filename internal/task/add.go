@@ -126,8 +126,10 @@ func Add(c container.C, entries []discover.Entry, name, relPath string) error {
 	}
 	if _, err := gitx.Run(storePath, "worktree", "add", "--quiet", "-b", name, wtPath, repo.BaseSHA); err != nil {
 		rollback()
+		// Same reason as create's site: git's explanation is the only thing
+		// that distinguishes a filter failure from a path collision.
 		return wkterr.New("WKT_WORKTREE_ADD", "cannot add the worktree").
-			WithRepo(relPath).WithPath(wtPath)
+			WithRepo(relPath).WithPath(wtPath).WithFound(err.Error())
 	}
 	undos = append(undos, func() {
 		_, _ = gitx.Run(storePath, "worktree", "remove", "--force", "--force", wtPath)
