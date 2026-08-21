@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.4.1 — 2026-08-21
+
+Two reported defects, both about `--force` losing work, and one warning of my
+own that fired on the ordinary case.
 
 - **`--force` no longer deletes a repository created inside the tree**
   (issue #1). Someone starting a new service inside a task — `git init`, a few
