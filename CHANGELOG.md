@@ -1,34 +1,55 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 — 2026-08-21
 
-- A command now **waits** for another wkt process to finish (up to 10s) instead
-  of failing outright the moment their runs overlap. The whole premise is two
-  agents working at once, and a set-level operation takes well under a second.
-- **Large loose files are linked, not copied.** Copying is right for the files a
-  task edits and wrong for the ones it only reads: the first real workspace this
-  ran against had 19 slide images in an ancestor directory, and every task
-  copied all of them. Above 1 MiB the file appears in the tree as a link.
-- `wkt init` **warns about a repository deeper than the discovery bound**. Such
+Claude Code integration, and a command that reconciles what wkt thinks with
+what is on disk.
+
+### Claude Code worktree hooks
+
+`claude --worktree` normally cuts a worktree from the one repository the
+session was launched in. Point its hooks at wkt — `wkt hook install` prints the
+block — and a session started in a multi-repo workspace lands in a task tree
+covering every repository, all on one branch. Verified end to end against
+Claude Code 2.1.238.
+
+- Re-firing the event returns the same tree, since `--resume --worktree` fires
+  it again.
+- A suggested slug carrying a separator is sanitised rather than refused: the
+  contract has no channel for "I renamed your slug".
+- The removal path keeps every teardown refusal and puts the reason on stderr,
+  where Claude Code shows it to you.
+- Claude Code's own `.claude/.cc-writes` no longer blocks removal. It appears
+  the first time an agent edits a file, so without this every task a session
+  had actually worked in needed `--force`. Found by running the real thing.
+
+### `wkt doctor`
+
+Reconciles state against the disk: tasks whose tree is gone, directories in
+`trees/` that no task claims, and base pins left in your repositories by tasks
+that no longer exist. `--fix` repairs only what is unambiguous and never
+removes anything that could hold work.
+
+`wkt doctor --all` is the uninstall answer: it lists every `refs/wkt/*` wkt has
+written into your own repositories, whether or not it is a problem. A tool that
+writes into someone else's repository should be able to say exactly what it
+put there.
+
+### Fixes
+
+- A command **waits** for another wkt process (up to 10s) instead of failing
+  the moment two runs overlap. The premise is two agents at once, and a
+  set-level operation takes well under a second — but it gives up rather than
+  hanging forever on a stale holder.
+- **Loose files over 1 MiB are linked into the tree, not copied.** Copying is
+  right for what a task edits and wrong for what it only reads: the first real
+  workspace this ran against had 19 slide images in an ancestor directory and
+  copied all of them into every task. Measured there: 3.3M and 41 files down to
+  1.7M and 35.
+- `wkt init` **warns about a repository deeper than the discovery bound.** Such
   a repository makes its containing directory unlinkable — wkt will not share it
   writably with every task — and that refusal used to arrive at the first
-  `wkt new`, one command after the one that walked the workspace.
-
-- **Claude Code worktree hooks.** `wkt hook install` prints the settings block;
-  after that `claude --worktree` in a multi-repo workspace produces a wkt task
-  tree instead of a single repository's worktree. Re-firing the event returns
-  the same tree, a suggested slug carrying a separator is sanitised rather than
-  refused, and the removal path keeps every teardown refusal.
-- Claude Code's own `.claude/.cc-writes` no longer blocks removal. It appears
-  the first time an agent edits a file, so without this every task driven
-  through the hooks needed `--force` — found by running the real thing.
-
-- `wkt doctor` — reconciles state against the disk: tasks whose tree is gone,
-  directories in `trees/` that no task claims, and base pins left in your
-  repositories by tasks that no longer exist. `--fix` repairs only what is
-  unambiguous and never removes anything that could hold work. `--all` lists
-  every `refs/wkt/*` wkt has written into your own repositories, which is the
-  answer you need before deciding to keep the tool.
+  `wkt new` instead.
 
 ## v0.1.1 — 2026-08-21
 
