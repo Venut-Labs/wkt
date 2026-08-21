@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-08-21
+
+Four defects, all found by measuring the design's own open questions rather
+than by reading them. Two of the four were shipped in v0.3.0 and failed
+silently.
 
 Four fixes, all found by measuring the design's own open questions rather than
 by reading them.
