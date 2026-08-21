@@ -51,6 +51,7 @@ func Run(c container.C, fix bool) ([]Finding, error) {
 		return nil, err
 	}
 	out = append(out, orphans...)
+	out = append(out, checkStores(c)...)
 	refs, err := checkWorkspaceRefs(c, names, known, fix)
 	if err != nil {
 		return nil, err
@@ -196,4 +197,51 @@ func checkWorkspaceRefs(c container.C, names []string, known map[string]bool, fi
 		}
 	}
 	return out, nil
+}
+
+// checkStores reports a store that did not finish being built.
+//
+// This is the state where everything looks healthy and is not: the store still
+// borrows objects from the developer's own repository, so the task's commits
+// become unreadable the moment that repository is re-cloned or collected, and
+// its hooks are live. doctor reports it and stops — the store may be the only
+// copy of a task's unpushed commits, so repairing it by rebuilding would turn
+// a recoverable problem into a lost one.
+func checkStores(c container.C) []Finding {
+	entries, err := os.ReadDir(c.StoreDir())
+	if err != nil {
+		return nil
+	}
+	var out []Finding
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasSuffix(e.Name(), ".git") {
+			continue
+		}
+		sp := filepath.Join(c.StoreDir(), e.Name())
+		if v, err := gitx.Run(sp, "config", "--get", "wkt.storecomplete"); err == nil && strings.TrimSpace(v) != "" {
+			continue
+		}
+		var missing []string
+		if _, err := os.Stat(filepath.Join(sp, "objects", "info", "alternates")); err == nil {
+			missing = append(missing, "borrows objects from the workspace repository")
+		}
+		if v, err := gitx.Run(sp, "config", "--get", "core.hooksPath"); err != nil || strings.TrimSpace(v) == "" {
+			missing = append(missing, "hooks are live")
+		}
+		if v, err := gitx.Run(sp, "config", "--get", "gc.auto"); err != nil || strings.TrimSpace(v) != "0" {
+			missing = append(missing, "gc is not disabled")
+		}
+		if v, err := gitx.Run(sp, "config", "--get", "remote.workspace.url"); err != nil || strings.TrimSpace(v) == "" {
+			missing = append(missing, "no workspace remote")
+		}
+		if len(missing) == 0 {
+			continue // complete, merely unmarked: an earlier version built it
+		}
+		out = append(out, Finding{
+			Code: "WKT_STORE_INCOMPLETE", Path: sp,
+			Detail: "unfinished store: " + strings.Join(missing, "; ") +
+				" — wkt will not rebuild it, because it may hold the only copy of a task's unpushed commits",
+		})
+	}
+	return out
 }

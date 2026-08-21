@@ -264,3 +264,73 @@ func TestFixNeverFollowsALinkOutOfTheContainer(t *testing.T) {
 		t.Fatalf("a symlink in trees/ must be reported, got %v", codes(findings))
 	}
 }
+
+// TestFindsAnUnfinishedStore — doctor returned rc=0 on a store that still
+// borrowed objects from the developer's own repository and had live hooks.
+// That is the state where the task looks healthy right up until the
+// repository is re-cloned and every commit in the tree becomes unreadable, so
+// it is exactly what doctor is for.
+func TestFindsAnUnfinishedStore(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := task.Create(c, entries, "t1", []string{"svc-a"}); err != nil {
+		t.Fatal(err)
+	}
+	stores, err := os.ReadDir(c.StoreDir())
+	if err != nil || len(stores) == 0 {
+		t.Fatalf("precondition: a store should exist: %v", err)
+	}
+	sp := filepath.Join(c.StoreDir(), stores[0].Name())
+
+	// Undo the hardening, the way an interrupted build leaves it.
+	g(t, sp, "config", "--unset-all", "wkt.storecomplete")
+	g(t, sp, "config", "--unset-all", "core.hooksPath")
+	if err := os.MkdirAll(filepath.Join(sp, "objects", "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sp, "objects", "info", "alternates"),
+		[]byte(filepath.Join(c.Workspace, "svc-a", ".git", "objects")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := Run(c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(findings, "WKT_STORE_INCOMPLETE") {
+		t.Fatalf("doctor must report a store that is not finished, got %v", codes(findings))
+	}
+	for _, f := range findings {
+		if f.Code == "WKT_STORE_INCOMPLETE" && f.Info {
+			t.Fatal("an unfinished store is a problem, not an informational note")
+		}
+	}
+}
+
+// TestFixNeverTouchesAnUnfinishedStore — doctor reports it and stops. The
+// store may be the only copy of a task's unpushed commits, and deleting or
+// rebuilding it turns a loud, recoverable problem into a silent, lossy one.
+func TestFixNeverTouchesAnUnfinishedStore(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := task.Create(c, entries, "t1", []string{"svc-a"}); err != nil {
+		t.Fatal(err)
+	}
+	stores, _ := os.ReadDir(c.StoreDir())
+	sp := filepath.Join(c.StoreDir(), stores[0].Name())
+	g(t, sp, "config", "--unset-all", "wkt.storecomplete")
+	g(t, sp, "config", "--unset-all", "core.hooksPath")
+
+	before, err := os.ReadDir(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(c, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadDir(sp)
+	if err != nil {
+		t.Fatal("--fix removed a store it was only meant to report")
+	}
+	if len(after) != len(before) {
+		t.Fatalf("--fix changed the store's contents: %d entries, was %d", len(after), len(before))
+	}
+}

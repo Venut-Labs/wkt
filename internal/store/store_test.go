@@ -1,11 +1,14 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 func g(t *testing.T, dir string, args ...string) string {
@@ -192,4 +195,132 @@ func splitLines(s string) []string {
 		out = append(out, cur)
 	}
 	return out
+}
+
+// TestEnsureRefusesAHalfBuiltStore covers a defect that was silent for days
+// and then destroyed work.
+//
+// A store build interrupted after "git clone" but before hardening leaves a
+// directory that looks finished. Ensure tested only that the directory
+// existed, so the next run adopted it: the tree kept borrowing objects from
+// the developer's own repository (so a later gc or re-clone made every commit
+// in the task unreadable), origin still pointed at their clone, there was no
+// workspace remote, and the store's hooks were live — a planted pre-commit
+// hook was observed executing inside the task tree.
+//
+// Ctrl-C during "wkt new" is all it takes.
+func TestEnsureRefusesAHalfBuiltStore(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	sha := seedRepo(t, repo)
+	storeDir := filepath.Join(base, "store")
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly what an interrupted Ensure leaves behind: the clone, nothing else.
+	sp := filepath.Join(storeDir, ID("repo", repo)+".git")
+	g(t, storeDir, "clone", "--shared", "--bare", "-q", repo, sp)
+	planted := filepath.Join(sp, "hooks", "pre-commit")
+	if err := os.WriteFile(planted, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Ensure(storeDir, repo, "repo", "t1", sha)
+	if err == nil {
+		t.Fatal("a half-built store must never be adopted as finished")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) || e.Code != "WKT_STORE_INCOMPLETE" {
+		t.Fatalf("want WKT_STORE_INCOMPLETE, got %v", err)
+	}
+	// The refusal has to say what is wrong, or the person cannot judge whether
+	// the store holds work they still need.
+	var saidBorrow, saidHooks bool
+	for _, p := range e.Problems {
+		if strings.Contains(p.Detail, "borrow") {
+			saidBorrow = true
+		}
+		if strings.Contains(p.Detail, "hooks") {
+			saidHooks = true
+		}
+	}
+	if !saidBorrow || !saidHooks {
+		t.Fatalf("the refusal must name each broken invariant: %+v", e.Problems)
+	}
+	if len(e.Remedy) == 0 {
+		t.Fatalf("and say what to do about it: %+v", e)
+	}
+
+	// And it is left exactly as found: the store may be the only copy of a
+	// previous task's unpushed commits, so wkt never deletes or rebuilds it.
+	if _, statErr := os.Stat(sp); statErr != nil {
+		t.Fatal("the refused store must not be deleted")
+	}
+	if _, statErr := os.Stat(planted); statErr != nil {
+		t.Fatal("nothing inside the store may be touched either")
+	}
+}
+
+// TestEnsureAdoptsAStoreFromAnEarlierVersion is the upgrade path, and the
+// reason the check verifies invariants instead of demanding a marker: every
+// store built before this change is complete and carries no marker, so a rule
+// of "no marker means rebuild" would condemn the entire installed base — and
+// rebuilding is itself destructive.
+func TestEnsureAdoptsAStoreFromAnEarlierVersion(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	sha := seedRepo(t, repo)
+	storeDir := filepath.Join(base, "store")
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sp, err := Ensure(storeDir, repo, "repo", "t1", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make it look like a store an older wkt built: complete, unmarked.
+	g(t, sp, "config", "--unset-all", "wkt.storecomplete")
+
+	again, err := Ensure(storeDir, repo, "repo", "t2", sha)
+	if err != nil {
+		t.Fatalf("a complete store from an earlier version must be adopted: %v", err)
+	}
+	if again != sp {
+		t.Fatalf("adopted %s, want %s", again, sp)
+	}
+	// Having verified it, wkt stamps it, so the next run is a single lookup.
+	if out := strings.TrimSpace(g(t, sp, "config", "--get", "wkt.storecomplete")); out == "" {
+		t.Fatal("a verified store must be stamped")
+	}
+}
+
+// TestEnsureStampsOnlyAfterHardening — the marker means "every invariant in
+// spec §5.2 holds", so writing it before they do would make the check a lie.
+func TestEnsureStampsOnlyAfterHardening(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	sha := seedRepo(t, repo)
+	storeDir := filepath.Join(base, "store")
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sp, err := Ensure(storeDir, repo, "repo", "t1", sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct{ what, got string }{
+		{"gc.auto", strings.TrimSpace(g(t, sp, "config", "--get", "gc.auto"))},
+		{"core.hooksPath", strings.TrimSpace(g(t, sp, "config", "--get", "core.hooksPath"))},
+		{"workspace remote", strings.TrimSpace(g(t, sp, "config", "--get", "remote.workspace.url"))},
+		{"marker", strings.TrimSpace(g(t, sp, "config", "--get", "wkt.storecomplete"))},
+	} {
+		if check.got == "" {
+			t.Errorf("%s must be set on a finished store", check.what)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(sp, "objects", "info", "alternates")); !os.IsNotExist(statErr) {
+		t.Error("a finished store must not borrow objects")
+	}
 }
