@@ -222,6 +222,10 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 		return false
 	}
 
+	// Directories already reported as untracked content, so their contents are
+	// walked without being reported again.
+	var reportedDirs []string
+
 	_ = filepath.WalkDir(treeRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -268,12 +272,21 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 						// for --force without reading the list, which is the
 						// one thing this check cannot afford (finding L2).
 						out = append(out, Blocker{Code: "WKT_REGENERABLE_TREE_CONTENT", Path: p, Severity: "info"})
+					case underReported(reportedDirs, rel):
+						// Already accounted for by the directory above it.
+						// Descending anyway is the point: a repository created
+						// inside the tree lives below untracked content, and
+						// stopping here is what made it invisible to the
+						// foreign-repo scan — so "wkt rm --force" deleted the
+						// only copy of its history (issue #1).
 					default:
 						out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
 						if d.IsDir() {
-							return fs.SkipDir
+							// Report the directory once, then keep walking
+							// into it rather than turning one problem into a
+							// wall of them.
+							reportedDirs = append(reportedDirs, rel)
 						}
-						return nil
 					}
 				}
 			}
@@ -384,10 +397,20 @@ func firstLine(s string) string { return strings.SplitN(strings.TrimSpace(s), "\
 // Deletion goes through os.RemoveAll on a path this function computed —
 // never a shell command, never a symlink-following walker (spec H3): "rm -rf
 // link/" with a trailing slash destroys the symlink's target, not the link.
-func Remove(c container.C, name string, force bool) error {
+// Kept is a branch tip parked in the store because it held work no remote
+// has. wkt rm prints these, so "recover it with git log <ref>" is something
+// the user is told rather than something they have to know.
+type Kept struct {
+	Repo  string
+	Store string
+	Ref   string
+	SHA   string
+}
+
+func Remove(c container.C, name string, force bool) ([]Kept, error) {
 	t, err := state.Load(c.StateDir(), name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	treeRoot := c.TreePath(name)
@@ -414,7 +437,7 @@ func Remove(c container.C, name string, force bool) error {
 
 	all, err := Preflight(c, t)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Severity "info" entries (regenerable ignored content) are reported but
 	// never gate removal or the force decision — only the blocking ones do.
@@ -426,11 +449,18 @@ func Remove(c container.C, name string, force bool) error {
 	}
 	for _, b := range blocking {
 		if b.Code == "WKT_FOREIGN_REPO" {
-			return wkterr.New(b.Code, "a repository wkt did not create lives inside the tree").
-				WithPath(b.Path).WithRemedy("move it out of the tree, then retry")
+			// Unconditional, --force included: a repository created inside the
+			// tree has no store behind it, so its history exists nowhere else
+			// and nothing can bring it back (spec §5.7, issue #1). This is the
+			// one refusal --force does not cover, which is what keeps --force
+			// safe to reach for at all.
+			return nil, wkterr.New(b.Code, "a repository wkt did not create lives inside the tree").
+				WithPath(b.Path).
+				WithRemedy("move it out of the tree, or push it somewhere first",
+					"then retry the removal")
 		}
 		if b.Code == "WKT_SUBMODULE" && force {
-			return wkterr.New(b.Code, "a submodule is present; --force would destroy its objects").
+			return nil, wkterr.New(b.Code, "a submodule is present; --force would destroy its objects").
 				WithRepo(b.Repo).WithRemedy("push the submodule's commits", "git submodule deinit", "then retry")
 		}
 	}
@@ -446,11 +476,11 @@ func Remove(c container.C, name string, force bool) error {
 				Detail: b.Detail, Info: b.Severity == "info",
 			})
 		}
-		return e.WithRemedy(remedyFor(blocking, name)...)
+		return nil, e.WithRemedy(remedyFor(blocking, name)...)
 	}
 
 	if err := os.MkdirAll(c.StagingDir(), 0o700); err != nil {
-		return wkterr.New("WKT_STAGING", "cannot create the staging directory").WithPath(c.StagingDir())
+		return nil, wkterr.New("WKT_STAGING", "cannot create the staging directory").WithPath(c.StagingDir())
 	}
 	if err := os.Rename(treeRoot, staged); err != nil {
 		// Degrading the fence to a per-repo, non-atomic sequence when
@@ -464,7 +494,7 @@ func Remove(c container.C, name string, force bool) error {
 		if errors.Is(err, syscall.EXDEV) {
 			msg = "the tree and staging/ are on different filesystems, so the removal fence cannot be atomic"
 		}
-		return wkterr.New("WKT_STAGING", msg).
+		return nil, wkterr.New("WKT_STAGING", msg).
 			WithPath(treeRoot).WithFound(err.Error()).
 			WithRemedy(remedy)
 	}
@@ -505,7 +535,8 @@ func refreshAfterRemoval(c container.C) {
 // staged may or may not exist — os.RemoveAll is a no-op on a path that
 // isn't there, so this same call resumes an interrupted delete without a
 // separate branch for that case).
-func finishRemove(c container.C, t state.Task, name, staged string) error {
+func finishRemove(c container.C, t state.Task, name, staged string) ([]Kept, error) {
+	var kept []Kept
 	for _, r := range t.Repos {
 		sp := filepath.Join(c.StoreDir(), r.StoreID+".git")
 		_, _ = gitx.Run(sp, "worktree", "unlock", r.WorktreePath)
@@ -517,19 +548,29 @@ func finishRemove(c container.C, t state.Task, name, staged string) error {
 		// task with the same name fails Validate's WKT_BRANCH_EXISTS check
 		// against the store even though the task was cleanly removed. See
 		// remove_test.go's TestRemoveCleansUpStoreBranchSoTaskNameCanBeReused.
+		// Before dropping the branch, keep whatever it held that exists
+		// nowhere else. After a forced removal the objects survive in the
+		// store but nothing points at them, so recovering means knowing a
+		// store exists, finding the right *.git and digging for a dangling
+		// commit — which reads as data loss at the moment the tool is trusted
+		// least (issue #2). A ref costs nothing and makes it an ordinary
+		// "git log".
+		if k, ok := keepUnpushed(sp, r, name); ok {
+			kept = append(kept, k)
+		}
 		_, _ = gitx.Run(sp, "branch", "-D", r.Branch)
 		_, _ = gitx.Run(r.AbsPath, "update-ref", "-d", r.BasePinRef)
 	}
 	if err := os.RemoveAll(staged); err != nil {
-		return wkterr.New("WKT_REMOVE_FAILED", "cannot remove the staged tree").WithPath(staged)
+		return nil, wkterr.New("WKT_REMOVE_FAILED", "cannot remove the staged tree").WithPath(staged)
 	}
 	if err := os.Remove(filepath.Join(c.StateDir(), name+".json")); err != nil && !os.IsNotExist(err) {
-		return wkterr.New("WKT_STATE_WRITE", "cannot remove task state").WithPath(name)
+		return nil, wkterr.New("WKT_STATE_WRITE", "cannot remove task state").WithPath(name)
 	}
 	// The task is gone from state, so this now regenerates exactly the
 	// survivors' perimeters, dropping the tree that just disappeared.
 	refreshAfterRemoval(c)
-	return nil
+	return kept, nil
 }
 
 // describePorcelain turns "git status --porcelain" output into one line of
@@ -651,4 +692,42 @@ func ownsSomethingUnder(owned map[string]bool, rel string) bool {
 		}
 	}
 	return false
+}
+
+// underReported reports whether rel sits below a directory already reported
+// as untracked content.
+func underReported(reported []string, rel string) bool {
+	for _, dir := range reported {
+		if strings.HasPrefix(rel, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// keepUnpushed parks a removed branch's tip under refs/wkt/removed/<task>
+// when it carries commits no remote has.
+//
+// Only when there is something to keep: a ref for every removal would turn
+// the store into a graveyard and pin objects gc should be free to drop. The
+// test for "something to keep" is the same one the refusal used — commits
+// reachable from the branch but from no remote and not the recorded base.
+func keepUnpushed(storePath string, r state.Repo, task string) (Kept, bool) {
+	tip, err := gitx.Run(storePath, "rev-parse", "--verify", "--quiet", "refs/heads/"+r.Branch)
+	if err != nil || tip == "" {
+		return Kept{}, false
+	}
+	args := []string{"rev-list", "--count", tip, "--not", "--remotes"}
+	if r.BaseSHA != "" {
+		args = append(args, r.BaseSHA)
+	}
+	out, err := gitx.Run(storePath, args...)
+	if err != nil || strings.TrimSpace(out) == "0" {
+		return Kept{}, false // pushed, or nothing beyond the base: nothing at risk
+	}
+	ref := "refs/wkt/removed/" + task
+	if _, err := gitx.Run(storePath, "update-ref", ref, tip); err != nil {
+		return Kept{}, false
+	}
+	return Kept{Repo: r.RelPath, Store: storePath, Ref: ref, SHA: tip}, true
 }

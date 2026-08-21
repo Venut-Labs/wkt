@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Venut-Labs/wkt/internal/discover"
+	"github.com/Venut-Labs/wkt/internal/gitx"
 	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
@@ -36,7 +37,7 @@ func TestRemoveRefusesOnIgnoredButPreciousFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = Remove(c, "feat-x", false)
+	_, err = Remove(c, "feat-x", false)
 	if err == nil {
 		t.Fatal("removal must refuse while an ignored-but-precious file exists")
 	}
@@ -112,7 +113,7 @@ func TestRemoveDetectsForeignRepoNestedInsideMaterialisedWorktree(t *testing.T) 
 		t.Fatalf("a foreign repository nested inside a materialised worktree must be detected, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-z", true); err == nil {
+	if _, err := Remove(c, "feat-z", true); err == nil {
 		t.Fatal("a foreign repository must block removal even with --force: its history exists nowhere else")
 	}
 	if _, statErr := os.Stat(filepath.Join(foreign, ".git")); statErr != nil {
@@ -133,7 +134,7 @@ func TestRemoveCleansUpStoreBranchSoTaskNameCanBeReused(t *testing.T) {
 	if _, err := Create(c, entries, "feat-reuse", []string{"docs"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-reuse", false); err != nil {
+	if _, err := Remove(c, "feat-reuse", false); err != nil {
 		t.Fatalf("a clean tree must remove without --force: %v", err)
 	}
 
@@ -161,14 +162,14 @@ func TestRemoveRefusesOnUncommittedWorkWithoutForceButForceRemoves(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if err := Remove(c, "feat-dirty", false); err == nil {
+	if _, err := Remove(c, "feat-dirty", false); err == nil {
 		t.Fatal("uncommitted work must block removal without --force")
 	}
 	if _, statErr := os.Stat(wt); statErr != nil {
 		t.Fatal("the refused removal must not have deleted anything")
 	}
 
-	if err := Remove(c, "feat-dirty", true); err != nil {
+	if _, err := Remove(c, "feat-dirty", true); err != nil {
 		t.Fatalf("--force must remove a tree whose only problem is uncommitted work: %v", err)
 	}
 	if _, statErr := os.Stat(c.TreePath("feat-dirty")); !os.IsNotExist(statErr) {
@@ -267,10 +268,10 @@ func TestRemoveRefusesOnSubmoduleEvenWithForce(t *testing.T) {
 		t.Fatalf("a committed submodule must still be detected as a blocker, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-sub", false); err == nil {
+	if _, err := Remove(c, "feat-sub", false); err == nil {
 		t.Fatal("a submodule must block removal without --force")
 	}
-	if err := Remove(c, "feat-sub", true); err == nil {
+	if _, err := Remove(c, "feat-sub", true); err == nil {
 		t.Fatal("a submodule must block removal even with --force: --force would destroy its object store")
 	}
 	if _, statErr := os.Stat(wt); statErr != nil {
@@ -302,7 +303,7 @@ func TestRemoveRefusesOnDivergedCopiedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Remove(c, "feat-copy", false); err == nil {
+	if _, err := Remove(c, "feat-copy", false); err == nil {
 		t.Fatal("a diverged copied file must block removal")
 	}
 	if _, statErr := os.Stat(copied); statErr != nil {
@@ -342,7 +343,7 @@ func TestRemoveRefusesOnIgnoredKeyFileNotOnAnyDenylist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Remove(c, "feat-key", false); err == nil {
+	if _, err := Remove(c, "feat-key", false); err == nil {
 		t.Fatal("an ignored private key must block removal even though its name isn't on any hardcoded denylist")
 	}
 	if _, statErr := os.Stat(keyPath); statErr != nil {
@@ -393,7 +394,7 @@ func TestRemoveRefusesOnBulkIgnoredDirectoryNotOnAllowlist(t *testing.T) {
 		t.Fatalf("a bulk-ignored, unrecognised directory must block as a whole, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-secrets", false); err == nil {
+	if _, err := Remove(c, "feat-secrets", false); err == nil {
 		t.Fatal("a bulk-ignored unrecognised directory must block removal")
 	}
 }
@@ -442,7 +443,7 @@ func TestRemoveListsRegenerableIgnoredContentButDoesNotBlockOnIt(t *testing.T) {
 
 	// This is the whole point of listing it: --force must not be needed
 	// when the only ignored content is provably regenerable.
-	if err := Remove(c, "feat-nm", false); err != nil {
+	if _, err := Remove(c, "feat-nm", false); err != nil {
 		t.Fatalf("a tree whose only ignored content is regenerable must remove cleanly without --force: %v", err)
 	}
 }
@@ -487,7 +488,7 @@ func TestRemoveRefusesOnLinkSlotReplacedByRegularFile(t *testing.T) {
 		t.Fatalf("a link slot replaced by a regular file must block removal, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-linkchange", false); err == nil {
+	if _, err := Remove(c, "feat-linkchange", false); err == nil {
 		t.Fatal("a changed link slot must block removal without --force")
 	}
 }
@@ -598,7 +599,7 @@ func TestRemoveListsDSStoreButDoesNotBlockOnIt(t *testing.T) {
 
 	// The whole point: --force must not be needed just because Finder wrote
 	// a metadata file into the tree.
-	if err := Remove(c, "feat-dsstore", false); err != nil {
+	if _, err := Remove(c, "feat-dsstore", false); err != nil {
 		t.Fatalf("a tree whose only ignored content is .DS_Store must remove cleanly without --force: %v", err)
 	}
 }
@@ -650,7 +651,7 @@ func TestRemoveRefusesOnServerKeyBesideDSStore(t *testing.T) {
 		t.Fatalf(".DS_Store beside it should still be listed as regenerable, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-dsstore-key", false); err == nil {
+	if _, err := Remove(c, "feat-dsstore-key", false); err == nil {
 		t.Fatal("a real secret beside a regenerable OS artifact must still block removal without --force")
 	}
 }
@@ -685,7 +686,7 @@ func TestRemoveRefusesOnFileAtTreeRoot(t *testing.T) {
 		t.Fatalf("a file at the tree root must be reported as untracked tree content, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-root-file", false); err == nil {
+	if _, err := Remove(c, "feat-root-file", false); err == nil {
 		t.Fatal("a file at the tree root must block removal without --force")
 	}
 	if _, statErr := os.Stat(plan); statErr != nil {
@@ -722,7 +723,7 @@ func TestRemoveRefusesOnFileInNewSubdirectoryOfTreeRoot(t *testing.T) {
 		t.Fatalf("a file in a new subdirectory of the tree root must be reported as untracked tree content, got %+v", blockers)
 	}
 
-	if err := Remove(c, "feat-root-subdir", false); err == nil {
+	if _, err := Remove(c, "feat-root-subdir", false); err == nil {
 		t.Fatal("a new subdirectory at the tree root must block removal without --force")
 	}
 	if _, statErr := os.Stat(scratchFile); statErr != nil {
@@ -735,7 +736,7 @@ func TestRemoveRefusesOnFileInNewSubdirectoryOfTreeRoot(t *testing.T) {
 	if err := os.RemoveAll(scratchDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-root-subdir", false); err != nil {
+	if _, err := Remove(c, "feat-root-subdir", false); err != nil {
 		t.Fatalf("a clean tree must remove once the untracked content is gone: %v", err)
 	}
 }
@@ -760,7 +761,7 @@ func TestRemoveSucceedsWhenTheTreeWasDeletedByHand(t *testing.T) {
 
 	// Plain "rm", no --force: there is nothing left on disk to fence or to
 	// force through, so this must succeed on the first, unforced call.
-	if err := Remove(c, "feat-hand-deleted", false); err != nil {
+	if _, err := Remove(c, "feat-hand-deleted", false); err != nil {
 		t.Fatalf("removing a task whose tree was deleted by hand must succeed: %v", err)
 	}
 	if _, err := state.Load(c.StateDir(), "feat-hand-deleted"); err == nil {
@@ -810,7 +811,7 @@ func TestRemoveResumesFromStagingWhenTheTreeWasAlreadyMovedButNotFullyDeleted(t 
 
 	// No --force: the deletion this resumes was already authorised by
 	// whatever produced the staged-but-undeleted state in the first place.
-	if err := Remove(c, "feat-resume", false); err != nil {
+	if _, err := Remove(c, "feat-resume", false); err != nil {
 		t.Fatalf("removal must resume from staging rather than dying on a missing tree root: %v", err)
 	}
 	if _, statErr := os.Stat(staged); !os.IsNotExist(statErr) {
@@ -886,7 +887,7 @@ func TestPreflightFailsClosedWhenTheBaseSHACannotBeResolved(t *testing.T) {
 		t.Fatalf("an unresolvable base SHA must fail the unpushed-commit check closed, got %+v", blockers)
 	}
 
-	if err := Remove(c, task.Name, false); err == nil {
+	if _, err := Remove(c, task.Name, false); err == nil {
 		t.Fatal("a failed unpushed-commit check must block removal: 'cannot tell' is 'would lose work'")
 	}
 	if _, statErr := os.Stat(task.Repos[0].WorktreePath); statErr != nil {
@@ -916,7 +917,7 @@ func TestPreflightFailsClosedWhenTheIgnoredContentCheckFails(t *testing.T) {
 		t.Fatalf("a failed ignored-content check must fail closed, got %+v", blockers)
 	}
 
-	if err := Remove(c, task.Name, false); err == nil {
+	if _, err := Remove(c, task.Name, false); err == nil {
 		t.Fatal("a failed ignored-content check must block removal")
 	}
 }
@@ -943,7 +944,7 @@ func TestPreflightFailsClosedWhenTheInProgressCheckFails(t *testing.T) {
 		t.Fatalf("a failed in-progress check must fail closed, got %+v", blockers)
 	}
 
-	if err := Remove(c, task.Name, false); err == nil {
+	if _, err := Remove(c, task.Name, false); err == nil {
 		t.Fatal("a failed in-progress check must block removal")
 	}
 }
@@ -970,7 +971,7 @@ func TestPreflightFailsClosedWhenTheSubmoduleCheckFails(t *testing.T) {
 		t.Fatalf("a failed submodule check must fail closed, got %+v", blockers)
 	}
 
-	if err := Remove(c, task.Name, false); err == nil {
+	if _, err := Remove(c, task.Name, false); err == nil {
 		t.Fatal("a failed submodule check must block removal")
 	}
 }
@@ -1001,7 +1002,7 @@ func TestRefusalSeparatesProblemsFromRemedy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = Remove(c, "feat-shape", false)
+	_, err = Remove(c, "feat-shape", false)
 	if err == nil {
 		t.Fatal("a dirty tree must refuse")
 	}
@@ -1106,7 +1107,7 @@ func TestOSArtifactAtTheTreeRootDoesNotBlockRemoval(t *testing.T) {
 			t.Fatalf(".DS_Store must be listed, never blocking: %+v", b)
 		}
 	}
-	if err := Remove(c, "feat-finder", false); err != nil {
+	if _, err := Remove(c, "feat-finder", false); err != nil {
 		t.Fatalf("a tree whose only extra content is an OS artifact must remove cleanly: %v", err)
 	}
 }
@@ -1121,7 +1122,7 @@ func TestRealUntrackedContentAtTheTreeRootStillBlocks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(c.TreePath("feat-notes"), "notes.md"), []byte("real work\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-notes", false); err == nil {
+	if _, err := Remove(c, "feat-notes", false); err == nil {
 		t.Fatal("untracked content at the tree root must still block removal")
 	}
 }
@@ -1161,7 +1162,7 @@ func TestUserContentBesideThePerimeterStillBlocks(t *testing.T) {
 		[]byte("my custom agent\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-beside", false); err == nil {
+	if _, err := Remove(c, "feat-beside", false); err == nil {
 		t.Fatal("content the user put beside the perimeter must still block removal")
 	}
 
@@ -1174,7 +1175,7 @@ func TestUserContentBesideThePerimeterStillBlocks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoClaude, "notes.md"), []byte("mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c2, "feat-beside2", false); err == nil {
+	if _, err := Remove(c2, "feat-beside2", false); err == nil {
 		t.Fatal("content beside the perimeter inside a repository must block too")
 	}
 }
@@ -1197,7 +1198,7 @@ func TestClaudeCodeBookkeepingDoesNotBlockRemoval(t *testing.T) {
 		[]byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-cc", false); err != nil {
+	if _, err := Remove(c, "feat-cc", false); err != nil {
 		t.Fatalf("Claude Code's own bookkeeping must not block removal: %v", err)
 	}
 }
@@ -1218,7 +1219,173 @@ func TestUserFilesInsideDotClaudeStillBlock(t *testing.T) {
 		[]byte("my agent\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-cc2", false); err == nil {
+	if _, err := Remove(c, "feat-cc2", false); err == nil {
 		t.Fatal("a file the user wrote inside .claude must still block removal")
+	}
+}
+
+// TestForceNeverDestroysARepositoryCreatedInsideTheTree — reported as issue #1
+// and reproduced exactly: someone starts a new service while working on a
+// task ("git init" inside the tree, a few commits, nothing pushed), and
+// "wkt rm --force" deletes the only copy of that history.
+//
+// --force means "discard the worktree changes I know about". It cannot mean
+// "delete a repository", because that one is not recoverable from anywhere:
+// there is no store behind it. Spec §5.7 already says so; the walk simply
+// never got far enough to notice, because it reported the directory as
+// untracked content and stopped descending.
+func TestForceNeverDestroysARepositoryCreatedInsideTheTree(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-newsvc", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(c.TreePath("feat-newsvc"), "services", "svc-new")
+	if err := os.MkdirAll(fresh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fresh, "a.txt"), []byte("brand new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, fresh, "init", "-q")
+	g(t, fresh, "add", "-A")
+	g(t, fresh, "commit", "-qm", "new service, never pushed anywhere")
+	sha := strings.TrimSpace(g(t, fresh, "rev-parse", "HEAD"))
+
+	// Without --force it already refuses; the point is that --force must not
+	// override this particular refusal.
+	_, err := Remove(c, "feat-newsvc", true)
+	if err == nil {
+		t.Fatal("--force must not delete a repository whose history exists nowhere else")
+	}
+	var e *wkterr.E
+	if !errors.As(err, &e) || e.Code != "WKT_FOREIGN_REPO" {
+		t.Fatalf("want WKT_FOREIGN_REPO, got %v", err)
+	}
+	if !strings.Contains(strings.Join(e.Remedy, " "), "move") &&
+		!strings.Contains(strings.Join(e.Remedy, " "), "push") {
+		t.Fatalf("the refusal must say what to do with it: %+v", e)
+	}
+
+	// And it is all still there.
+	if _, statErr := os.Stat(filepath.Join(fresh, "a.txt")); statErr != nil {
+		t.Fatal("the repository was deleted anyway")
+	}
+	if !gitx.RunOK(fresh, "cat-file", "-e", sha) {
+		t.Fatal("its history is gone")
+	}
+}
+
+// TestForeignRepoIsFoundBelowUntrackedContent pins the mechanism rather than
+// the symptom: the walk used to report an untracked directory and stop, so a
+// repository one level inside it was invisible to every later check.
+func TestForeignRepoIsFoundBelowUntrackedContent(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-deep", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	// Two levels of ordinary untracked directories, then a repository.
+	deep := filepath.Join(c.TreePath("feat-deep"), "scratch", "experiments", "prototype")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "x.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, deep, "init", "-q")
+	g(t, deep, "add", "-A")
+	g(t, deep, "commit", "-qm", "prototype")
+
+	tk, err := state.Load(c.StateDir(), "feat-deep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockers, err := Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawForeign bool
+	for _, b := range blockers {
+		if b.Code == "WKT_FOREIGN_REPO" {
+			sawForeign = true
+		}
+	}
+	if !sawForeign {
+		t.Fatalf("a repository below untracked content must still be found: %+v", blockers)
+	}
+
+	// The untracked directory itself is reported once, not once per file
+	// inside it: descending must not turn one problem into a wall of them.
+	var untracked int
+	for _, b := range blockers {
+		if b.Code == "WKT_UNTRACKED_TREE_CONTENT" {
+			untracked++
+		}
+	}
+	if untracked > 1 {
+		t.Fatalf("untracked content should be reported once per directory, got %d entries", untracked)
+	}
+}
+
+// TestForcedRemovalKeepsUnpushedWorkReachable — reported as issue #2. After
+// "wkt rm --force" the objects survive in the store, but nothing points at
+// them: the branch went with the tree. Recovery is possible and requires
+// knowing a store exists, finding the right *.git inside it, and digging for
+// a dangling commit — which in practice reads as data loss, at the moment the
+// user trusts the tool least.
+//
+// A ref costs nothing and turns that into a line the tool can print.
+func TestForcedRemovalKeepsUnpushedWorkReachable(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-keep", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := task.Repos[0].WorktreePath
+	g(t, wt, "commit", "-qm", "never pushed", "--allow-empty")
+	sha := strings.TrimSpace(g(t, wt, "rev-parse", "HEAD"))
+	storePath := filepath.Join(c.StoreDir(), task.Repos[0].StoreID+".git")
+
+	if _, err := Remove(c, "feat-keep", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// The commit is still there — that part already worked.
+	if !gitx.RunOK(storePath, "cat-file", "-e", sha) {
+		t.Fatal("the objects should survive in the store")
+	}
+	// And now something points at it.
+	kept := strings.TrimSpace(g(t, storePath, "rev-parse", "--verify", "--quiet", "refs/wkt/removed/feat-keep"))
+	if kept != sha {
+		t.Fatalf("refs/wkt/removed/feat-keep is %q, want the removed branch tip %q", kept, sha)
+	}
+	// Reachable, so an ordinary "git log" finds it rather than a fsck for
+	// dangling objects.
+	out := g(t, storePath, "rev-list", "--all")
+	if !strings.Contains(out, sha) {
+		t.Fatal("the kept commit must be reachable from a ref, not merely present")
+	}
+}
+
+// TestForcedRemovalKeepsNothingWhenThereWasNothingToKeep — a task whose work
+// was pushed, or which never committed anything, should leave no refs behind.
+// Keeping one for every removal would turn the store into a graveyard and
+// pin objects gc should be free to drop.
+func TestForcedRemovalKeepsNothingWhenThereWasNothingToKeep(t *testing.T) {
+	c, entries := fixture(t)
+	task, err := Create(c, entries, "feat-nothing", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(c.StoreDir(), task.Repos[0].StoreID+".git")
+	// Dirty, but nothing committed: --force is discarding worktree changes,
+	// which is exactly what it is for.
+	if err := os.WriteFile(filepath.Join(task.Repos[0].WorktreePath, "scratch.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Remove(c, "feat-nothing", true); err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.TrimSpace(g(t, storePath, "for-each-ref", "--format=%(refname)", "refs/wkt/removed/")); out != "" {
+		t.Fatalf("nothing was at risk, so nothing should be kept: %q", out)
 	}
 }

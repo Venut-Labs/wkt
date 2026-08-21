@@ -1607,3 +1607,52 @@ func TestSyncReportsAnUnreachableUpstream(t *testing.T) {
 		t.Fatalf("a check that could not run is not a clean result, got exit %d", code)
 	}
 }
+
+// TestInitDoesNotWarnAboutRepositoriesItFound — the warning added for finding
+// L4 fired on any directory that merely *contains* a discovered repository,
+// which is the product's whole shape: services/svc-a, DVS/Research/skill.
+// A warning that fires on the ordinary case teaches people to ignore
+// warnings, which is worse than not having it.
+func TestInitDoesNotWarnAboutRepositoriesItFound(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "services", "svc-a"))
+	seedRepo(t, filepath.Join(ws, "docs"))
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	if strings.Contains(errb.String(), "WKT_REPO_BELOW_BOUND") {
+		t.Fatalf("services/svc-a is at depth 2 and was discovered; nothing to warn about:\n%s", errb.String())
+	}
+	if !strings.Contains(out.String(), "services/svc-a") {
+		t.Fatalf("precondition: it should have been discovered:\n%s", out.String())
+	}
+}
+
+// TestRmSaysWhereItKeptTheWork — the half of issue #2 that matters. Keeping a
+// ref is only useful if the person is told it exists; otherwise recovery
+// still means knowing the store's layout by heart.
+func TestRmSaysWhereItKeptTheWork(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	tree := filepath.Join(containerOf(t, ws), "trees", "t1", "a")
+	gitCmd(t, tree, "commit", "-qm", "never pushed", "--allow-empty")
+
+	out.Reset()
+	if code := Run([]string{"rm", "t1", "--force", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("rm --force exited %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "refs/wkt/removed/t1") {
+		t.Fatalf("rm must say where it kept the unpushed work:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "recover with") {
+		t.Fatalf("and how to get at it:\n%s", out.String())
+	}
+}

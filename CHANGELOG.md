@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **`--force` no longer deletes a repository created inside the tree**
+  (issue #1). Someone starting a new service inside a task — `git init`, a few
+  commits, nothing pushed — could lose that history entirely: the walk reported
+  the directory as untracked content and stopped descending, so the repository
+  below it was invisible to every later check. The walk now reports each
+  untracked directory once and keeps going, and a repository whose history
+  exists nowhere else is the one refusal `--force` does not cover.
+- **A forced removal says where it kept your unpushed work** (issue #2). The
+  objects always survived in the store, but nothing pointed at them, so
+  recovery meant knowing the store's layout and digging for a dangling commit.
+  `wkt rm --force` now parks the branch tip at `refs/wkt/removed/<task>` — only
+  when there is something no remote has — and prints the command that reads it.
+- `wkt init` no longer warns about repositories it just found. The
+  below-the-bound warning fired on any directory *containing* a discovered
+  repository, which is the product's ordinary shape (`services/svc-a`).
+
 ## v0.4.0 — 2026-08-21
 
 Four defects, all found by measuring the design's own open questions rather

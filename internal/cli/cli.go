@@ -216,10 +216,25 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		// task (spec §5.3 rule 4). That refusal arrives at "wkt new", one
 		// command after the one that walked the workspace — so warn here,
 		// where the user is still deciding what this workspace looks like.
+		// Only directories that would actually be linked whole: one that
+		// *contains* a discovered repository is materialised instead, so
+		// warning about it fires on the product's ordinary shape
+		// (services/svc-a) and teaches people to ignore warnings.
 		var linkCandidates []string
 		if ents, err := os.ReadDir(c.Workspace); err == nil {
 			for _, e := range ents {
-				if e.IsDir() && !known[e.Name()] {
+				if !e.IsDir() || known[e.Name()] {
+					continue
+				}
+				prefix := e.Name() + "/"
+				containsKnown := false
+				for rel := range known {
+					if strings.HasPrefix(rel, prefix) {
+						containsKnown = true
+						break
+					}
+				}
+				if !containsKnown {
 					linkCandidates = append(linkCandidates, filepath.Join(c.Workspace, e.Name()))
 				}
 			}
@@ -455,7 +470,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			// The refusals stay: this is a different entry point, not a way
 			// around teardown. A non-zero exit shows stderr to the user, so
 			// the reason reaches them.
-			if err := task.Remove(c, name, false); err != nil {
+			if _, err := task.Remove(c, name, false); err != nil {
 				return fail(stderr, err)
 			}
 			return 0
@@ -717,8 +732,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 		defer release()
-		if err := task.Remove(c, positional, *force); err != nil {
+		kept, err := task.Remove(c, positional, *force)
+		if err != nil {
 			return fail(stderr, err)
+		}
+		// After a forced removal the objects survive in the store but nothing
+		// pointed at them, so the work read as lost. Say where it is.
+		for _, k := range kept {
+			fmt.Fprintf(stdout, "  kept %s at %s in %s\n    recover with: git -C %s log %s\n",
+				k.Repo, k.Ref, filepath.Base(k.Store), k.Store, k.Ref)
 		}
 		return 0
 	}

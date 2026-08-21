@@ -499,7 +499,7 @@ func TestRollbackTakesThePerimeterWithIt(t *testing.T) {
 	if _, err := Create(c, entries, "feat-doomed", []string{"docs"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(c, "feat-doomed", true); err != nil {
+	if _, err := Remove(c, "feat-doomed", true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(c.TreePath("feat-doomed")); !os.IsNotExist(err) {
