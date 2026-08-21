@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 — 2026-08-21
+
+The rest of the command table: a task can gain a repository, learn that its
+base has moved, hand its work back, and survive the workspace being moved.
 
 - `wkt repair TASK` **adopts a moved workspace.** State records absolute paths,
   so moving a project used to break every task in it beyond fixing: the
