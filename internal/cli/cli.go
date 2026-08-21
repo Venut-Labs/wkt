@@ -34,6 +34,7 @@ const usage = `wkt — one task, one branch, many repositories
   wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
   wkt add    TASK --repos a,b [--workspace DIR]
   wkt sync   TASK [--workspace DIR]
+  wkt repair TASK [--workspace DIR]
   wkt fetch  TASK [--as NAME] [--workspace DIR]
   wkt path   TASK [--workspace DIR]
   wkt status [TASK] [--workspace DIR]
@@ -358,6 +359,29 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			} else {
 				fmt.Fprintf(stdout, "  %-28s nothing to bring over\n", res.Repo)
 			}
+		}
+		return 0
+
+	case "repair":
+		// Fix the pointers a moved workspace breaks. It fixes; it never
+		// clears the way first (spec §6).
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		report, err := task.Repair(c, positional)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		for _, rep := range report {
+			marker := " "
+			if rep.Repaired {
+				marker = "fixed"
+			}
+			fmt.Fprintf(stdout, "  %-5s %-28s %s\n", marker, rep.Repo, rep.Detail)
 		}
 		return 0
 

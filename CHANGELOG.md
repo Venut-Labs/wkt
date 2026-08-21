@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `wkt repair TASK` **adopts a moved workspace.** State records absolute paths,
+  so moving a project used to break every task in it beyond fixing: the
+  worktrees detach, the back-fill links point at a workspace that is no longer
+  there, and the perimeter denies directories that no longer exist. repair now
+  rewrites the recorded paths, reattaches each worktree, re-aims the links and
+  regenerates the perimeter. It never clears the way first — where a link slot
+  has become a real directory, it says so and leaves the contents alone.
+
 - `wkt add TASK --repos b` grafts another repository onto a live task **at the
   task's recorded base epoch**, not today's tip: a task is a coherent slice of
   time across a set of repositories, and a latecomer arriving at HEAD would be

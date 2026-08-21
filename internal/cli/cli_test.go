@@ -1543,3 +1543,34 @@ func gitCmd(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %s", args, out)
 	}
 }
+
+// TestRepairVerb — the CLI seam. A moved workspace is the case, and the
+// report has to say what it could not fix as clearly as what it did.
+func TestRepairVerb(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "a"))
+	var out, errb bytes.Buffer
+	mustRun(t, &out, &errb, "init", "--workspace", ws)
+	mustRun(t, &out, &errb, "new", "t1", "--all", "--workspace", ws)
+
+	wt := filepath.Join(containerOf(t, ws), "trees", "t1", "a")
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /nowhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run([]string{"repair", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("repair exited %d:\n%s", code, out.String()+errb.String())
+	}
+	if !strings.Contains(out.String(), "fixed") {
+		t.Fatalf("repair must say what it fixed:\n%s", out.String())
+	}
+	// And the tree works again.
+	out.Reset()
+	if code := Run([]string{"status", "t1", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("the task should be healthy after a repair, exited %d:\n%s", code, out.String())
+	}
+	if code := Run([]string{"repair", "--workspace", ws}, &out, &errb); code != 2 {
+		t.Fatal("repair needs a task name")
+	}
+}
