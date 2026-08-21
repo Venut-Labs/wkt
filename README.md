@@ -86,3 +86,13 @@ under `problems` (what is in the way), with `remedy` reserved for what to do.
 `docs/superpowers/specs/2026-08-19-wkt-design.md` is the spec: what is built,
 what was measured, and what was deliberately left out. The plan that built v0,
 and the defects executing it surfaced, are beside it under `docs/superpowers/plans/`.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Venut Labs.
+
+Apache-2.0 over MIT for one reason that matters to a tool people run at work:
+it grants patent rights explicitly and terminates them for anyone who sues over
+the software. Everything MIT permits — use, modify, redistribute, ship inside a
+closed product — this permits too.
+
