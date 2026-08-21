@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **A task tree can be built in again.** The perimeter switches Claude Code's
+  sandbox on, which confines writes to the working directory — and every
+  toolchain keeps its cache outside it. Measured: an ordinary `go build` inside
+  a task tree failed with `open ~/Library/Caches/go-build/…: operation not
+  permitted`, and npm, cargo and pip fail the same way. A tree nobody can build
+  in is a tree nobody works in, and the remedy people reach for is deleting the
+  perimeter, which loses everything it is for. The cache roots are writable
+  now — `~/.cache`, `~/Library/Caches`, Go's module cache, and whatever
+  `GOCACHE`, `GOMODCACHE`, `CARGO_HOME` or `npm_config_cache` point at.
+  Verified that the workspace, sibling trees and wkt's own state stay closed.
+
 ## v0.4.1 — 2026-08-21
 
 Two reported defects, both about `--force` losing work, and one warning of my

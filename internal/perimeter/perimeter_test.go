@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -232,5 +233,74 @@ func TestDenyPathsAreNotDuplicatedUnderSandbox(t *testing.T) {
 	if len(d.Sandbox.Filesystem.DenyWrite) != 0 {
 		t.Fatalf("deny paths are merged from the Edit rules; restating them is waste: %v",
 			d.Sandbox.Filesystem.DenyWrite)
+	}
+}
+
+// TestToolchainCachesStayWritable — the perimeter turns Claude Code's sandbox
+// on, which confines writes to the working directory. Every toolchain keeps
+// its cache outside that: measured, an ordinary "go build" inside a task tree
+// failed with
+//
+//	open ~/Library/Caches/go-build/…: operation not permitted
+//
+// A tree that cannot be built in is a tree nobody will work in, and the answer
+// people reach for is to delete the perimeter entirely — which loses the
+// protection it exists for. The caches are allowed instead.
+func TestToolchainCachesStayWritable(t *testing.T) {
+	c, task, _ := fixture(t)
+	d, err := For(c, task, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := strings.Join(d.Sandbox.Filesystem.AllowWrite, "\n")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	want := []string{filepath.Join(home, ".cache")}
+	if runtime.GOOS == "darwin" {
+		want = append(want, filepath.Join(home, "Library", "Caches"))
+	}
+	// Go's module cache is not under either cache root.
+	want = append(want, filepath.Join(home, "go", "pkg", "mod"))
+	for _, p := range want {
+		if !strings.Contains(allowed, p) {
+			t.Errorf("a build needs %s writable; allowWrite is:\n%s", p, allowed)
+		}
+	}
+
+	// The store stays writable — the task's gitdir lives there (H5).
+	if !strings.Contains(allowed, c.StoreDir()) {
+		t.Errorf("the store must stay writable: %v", d.Sandbox.Filesystem.AllowWrite)
+	}
+	// And none of this opens the workspace, which is the whole point. Compare
+	// by path, not by substring: the store lives at "<workspace>.worktrees",
+	// which contains the workspace path as a prefix of its own name.
+	for _, p := range d.Sandbox.Filesystem.AllowWrite {
+		if p == c.Workspace || strings.HasPrefix(p, c.Workspace+string(filepath.Separator)) {
+			t.Errorf("the workspace must not become writable: %s", p)
+		}
+	}
+}
+
+// TestCacheOverridesFromTheEnvironmentAreHonoured — a developer who moved
+// their cache with GOCACHE or XDG_CACHE_HOME has moved it somewhere the
+// defaults do not name.
+func TestCacheOverridesFromTheEnvironmentAreHonoured(t *testing.T) {
+	moved := t.TempDir()
+	t.Setenv("GOCACHE", filepath.Join(moved, "go-build"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(moved, "xdg"))
+
+	c, task, _ := fixture(t)
+	d, err := For(c, task, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := strings.Join(d.Sandbox.Filesystem.AllowWrite, "\n")
+	for _, p := range []string{filepath.Join(moved, "go-build"), filepath.Join(moved, "xdg")} {
+		if !strings.Contains(allowed, p) {
+			t.Errorf("a cache moved by the environment must still be writable: %s not in\n%s", p, allowed)
+		}
 	}
 }

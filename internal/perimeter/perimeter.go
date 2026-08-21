@@ -152,7 +152,7 @@ func For(c container.C, t state.Task, siblings []string) (Document, error) {
 		Sandbox: Sandbox{
 			Enabled: true,
 			Filesystem: Filesystem{
-				AllowWrite: spellingsOf(c.StoreDir()),
+				AllowWrite: append(spellingsOf(c.StoreDir()), toolchainCaches()...),
 				DenyRead:   credentialDirs(),
 			},
 		},
@@ -205,4 +205,57 @@ func homeDir() (string, error) {
 		return strings.TrimPrefix(h, "/private"), nil
 	}
 	return h, nil
+}
+
+// toolchainCaches are the places a build writes that are not inside the tree.
+//
+// The perimeter switches Claude Code's sandbox on, which confines writes to
+// the working directory — and every toolchain keeps its cache outside it.
+// Measured: an ordinary "go build" in a task tree failed with "open
+// ~/Library/Caches/go-build/…: operation not permitted". A tree that cannot be
+// built in is a tree nobody works in, and the remedy people reach for is to
+// delete the perimeter, which loses everything it was for. Allowing the cache
+// roots costs nothing that matters: they are the developer's own scratch
+// space, not anybody's work, and the workspace and sibling trees stay closed.
+//
+// Roots rather than an inventory of toolchains: enumerating go, npm, cargo,
+// pip, gradle and the rest would be a list that is wrong the moment someone
+// uses the seventh one.
+func toolchainCaches() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		for _, sp := range spellingsOf(p) {
+			if !seen[sp] {
+				seen[sp] = true
+				out = append(out, sp)
+			}
+		}
+	}
+
+	// The XDG cache root, which is where most tools put their cache on Linux
+	// and some do everywhere.
+	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
+		add(xdg)
+	}
+	add(filepath.Join(home, ".cache"))
+	if runtime.GOOS == "darwin" {
+		add(filepath.Join(home, "Library", "Caches"))
+	}
+	// Go's module cache sits under neither root.
+	add(filepath.Join(home, "go", "pkg", "mod"))
+	// And whatever the developer moved with an environment variable, since a
+	// moved cache is by definition somewhere the defaults do not name.
+	for _, env := range []string{"GOCACHE", "GOMODCACHE", "CARGO_HOME", "npm_config_cache"} {
+		add(os.Getenv(env))
+	}
+	sort.Strings(out)
+	return out
 }
