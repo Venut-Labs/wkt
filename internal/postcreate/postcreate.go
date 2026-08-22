@@ -16,9 +16,13 @@
 package postcreate
 
 import (
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
@@ -110,5 +114,69 @@ func Run(req Request) (Result, error) {
 	return run(path, req)
 }
 
-// run is replaced in the next step; the refusals above are what this task is.
-func run(path string, req Request) (Result, error) { return Result{Ran: true}, nil }
+// run executes the script.
+//
+// The output is streamed rather than collected: an install runs for minutes,
+// and output shown only at the end is indistinguishable from a hang. A copy of
+// the tail is kept anyway, because the failure is read by an agent that cannot
+// see the terminal, and an exit status on its own is nothing it can act on.
+//
+// No timeout. Any number would be arbitrary, and killing a legitimate
+// twenty-minute install is worse than waiting: the output streams, so the run
+// is visibly alive, and Ctrl-C works.
+func run(path string, req Request) (Result, error) {
+	tail := &tailBuffer{limit: 4096}
+	cmd := exec.Command(path)
+	cmd.Dir = req.TreeRoot
+	cmd.Stdout = io.MultiWriter(req.Out, tail)
+	cmd.Stderr = cmd.Stdout
+	// The developer's own environment, whole. The script is theirs; scrubbing
+	// PATH, or the token a private registry needs, breaks exactly what it is
+	// for.
+	cmd.Env = append(os.Environ(),
+		"WKT_TASK="+req.Task,
+		"WKT_TREE="+req.TreeRoot,
+		"WKT_WORKSPACE="+req.Workspace,
+		"WKT_REPOS="+strings.Join(req.Repos, "\n"),
+		"WKT_ADDED_REPO="+req.AddedRepo,
+	)
+
+	err := cmd.Run()
+	if err == nil {
+		return Result{Ran: true}, nil
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		// Never started: a missing interpreter, or a file that is executable
+		// but not runnable on this machine.
+		return Result{Ran: true}, wkterr.New("WKT_POST_CREATE_FAILED",
+			"the post-create script could not be run").
+			WithPath(path).WithFound(err.Error()).
+			WithRemedy("check that its interpreter exists and that the file is runnable here")
+	}
+	code := exit.ExitCode()
+	return Result{Ran: true, ExitCode: code, Tail: tail.String()},
+		wkterr.New("WKT_POST_CREATE_FAILED", "the post-create script failed").
+			WithPath(path).
+			WithFound("exit status "+strconv.Itoa(code)).
+			WithDetail(tail.String()).
+			WithRemedy("the task was created and its tree is usable; fix the script and run it yourself from "+req.TreeRoot,
+				"or pass --no-post-create to skip it next time")
+}
+
+// tailBuffer keeps the last limit bytes written through it, so a failure can
+// quote the end of an install log without holding all of it.
+type tailBuffer struct {
+	limit int
+	buf   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.limit {
+		t.buf = t.buf[len(t.buf)-t.limit:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.buf) }

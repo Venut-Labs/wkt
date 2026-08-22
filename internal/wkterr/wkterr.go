@@ -7,12 +7,17 @@ import (
 )
 
 type E struct {
-	Code     string    `json:"code"`
-	Message  string    `json:"message"`
-	Repo     string    `json:"repo,omitempty"`
-	Path     string    `json:"path,omitempty"`
-	Expected string    `json:"expected,omitempty"`
-	Found    string    `json:"found,omitempty"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Repo     string `json:"repo,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Expected string `json:"expected,omitempty"`
+	Found    string `json:"found,omitempty"`
+	// Detail carries a subordinate process's own output, kept as it came.
+	// Unlike Problem.Detail it is not flattened to one line: it exists so a
+	// refusal wkt cannot classify still shows what the tool it ran actually
+	// said, and that is usually several lines an agent needs to read.
+	Detail   string    `json:"detail,omitempty"`
 	Problems []Problem `json:"problems,omitempty"`
 	Remedy   []string  `json:"remedy,omitempty"`
 }
@@ -73,6 +78,7 @@ func (e *E) WithRepo(r string) *E      { e.Repo = r; return e }
 func (e *E) WithPath(p string) *E      { e.Path = p; return e }
 func (e *E) WithFound(f string) *E     { e.Found = f; return e }
 func (e *E) WithExpected(x string) *E  { e.Expected = x; return e }
+func (e *E) WithDetail(d string) *E    { e.Detail = d; return e }
 func (e *E) WithRemedy(r ...string) *E { e.Remedy = append(e.Remedy, r...); return e }
 
 // WithProblem records one blocker. Detail is flattened to a single line here

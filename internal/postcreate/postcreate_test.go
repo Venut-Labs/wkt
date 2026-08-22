@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Venut-Labs/wkt/internal/wkterr"
@@ -110,5 +111,79 @@ func TestSafeNameAcceptsWhatTasksActuallyUse(t *testing.T) {
 		if SafeName(bad) {
 			t.Fatalf("%q must be refused", bad)
 		}
+	}
+}
+
+// The script is told where it is and what it is setting up. The working
+// directory is checked by creating a file rather than by comparing pwd to the
+// temporary path: on macOS pwd resolves /var to /private/var, and a test that
+// compares those strings fails for a reason that has nothing to do with wkt.
+func TestScriptGetsTheTreeAndTheTaskDescribed(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\ntouch here-is-cwd\n"+
+		"{ echo \"$WKT_TASK\"; echo \"$WKT_WORKSPACE\"; echo \"$WKT_REPOS\"; echo \"added=$WKT_ADDED_REPO\"; echo \"tree=$WKT_TREE\"; } > seen\n")
+
+	var out bytes.Buffer
+	res, err := Run(Request{
+		Workspace: ws, TreeRoot: tree, Task: "feat-42",
+		Repos: []string{"docs", "services/svc-a"}, AddedRepo: "services/svc-a", Out: &out,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Ran {
+		t.Fatal("the script should have run")
+	}
+	if _, statErr := os.Stat(filepath.Join(tree, "here-is-cwd")); statErr != nil {
+		t.Fatal("the script did not run with the tree root as its working directory")
+	}
+	seen, err := os.ReadFile(filepath.Join(tree, "seen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(seen)
+	for _, want := range []string{"feat-42", ws, "docs\nservices/svc-a", "added=services/svc-a", "tree=" + tree} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the script did not see %q; it saw:\n%s", want, got)
+		}
+	}
+}
+
+// wkt new prints exactly the tree path to stdout, and so does the
+// worktree-create hook, which Claude Code reads as the worktree path. A
+// script echoing into wkt's stdout would break both.
+func TestScriptOutputGoesToTheWriterNotStdout(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\necho to-stdout\necho to-stderr >&2\n")
+	var out bytes.Buffer
+	if _, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "to-stdout") || !strings.Contains(got, "to-stderr") {
+		t.Fatalf("both of the script's streams must reach the writer; got %q", got)
+	}
+}
+
+// An agent reads this failure. A bare exit status tells it nothing it can act
+// on, so the script's own words have to survive.
+func TestNonZeroExitCarriesTheStatusAndTheOutput(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\necho 'could not reach the registry' >&2\nexit 7\n")
+	var out bytes.Buffer
+	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
+	if code := codeOf(t, err); code != "WKT_POST_CREATE_FAILED" {
+		t.Fatalf("want WKT_POST_CREATE_FAILED, got %q (err %v)", code, err)
+	}
+	if res.ExitCode != 7 {
+		t.Fatalf("want exit 7, got %d", res.ExitCode)
+	}
+	var e *wkterr.E
+	errors.As(err, &e)
+	if !strings.Contains(e.Detail, "could not reach the registry") {
+		t.Fatalf("the script's own words must survive; detail was %q", e.Detail)
+	}
+	if !strings.Contains(e.Found, "7") {
+		t.Fatalf("the exit status must be named; found was %q", e.Found)
 	}
 }
