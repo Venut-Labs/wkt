@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
@@ -185,5 +186,49 @@ func TestNonZeroExitCarriesTheStatusAndTheOutput(t *testing.T) {
 	}
 	if !strings.Contains(e.Found, "7") {
 		t.Fatalf("the exit status must be named; found was %q", e.Found)
+	}
+}
+
+// Measured on Claude Code 2.1.239: a WorktreeCreate hook was cancelled at 591
+// seconds — "Hook cancelled", and the session got no worktree at all, though
+// wkt had built one. So on that path wkt must finish first: a script stopped
+// by wkt leaves a usable tree and a warning, where one stopped by Claude Code
+// leaves the session with nothing.
+func TestARunCanBeGivenADeadline(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\nsleep 30\ntouch \"$WKT_TREE/finished\"\n")
+	var out bytes.Buffer
+	start := time.Now()
+	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out, Timeout: 300 * time.Millisecond})
+	if code := codeOf(t, err); code != "WKT_POST_CREATE_TIMEOUT" {
+		t.Fatalf("want WKT_POST_CREATE_TIMEOUT, got %q (err %v)", code, err)
+	}
+	if !res.Ran {
+		t.Fatal("it did run; it was stopped")
+	}
+	// Tight on purpose. Killing only the shell leaves "sleep" holding the
+	// output pipe, and Wait then blocks until the WaitDelay backstop fires
+	// seconds later — which looks like enforcement and is not. Only killing
+	// the process group returns promptly, and a real script's npm and git are
+	// exactly the children this is about.
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("the deadline was not enforced promptly: %s", elapsed)
+	}
+	if _, statErr := os.Stat(filepath.Join(tree, "finished")); statErr == nil {
+		t.Fatal("the script was not actually stopped")
+	}
+}
+
+// No deadline is the command-line default: there is no external ceiling
+// there, and killing a legitimate twenty-minute install is worse than waiting.
+func TestZeroTimeoutMeansNoDeadline(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\nsleep 1\ntouch \"$WKT_TREE/finished\"\n")
+	var out bytes.Buffer
+	if _, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(filepath.Join(tree, "finished")); statErr != nil {
+		t.Fatal("a run with no deadline must be allowed to finish")
 	}
 }

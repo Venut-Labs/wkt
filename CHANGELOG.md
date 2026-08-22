@@ -32,12 +32,20 @@ and nothing else" — the carry shipped in v0.5.0, and this is the other half.
   wkt, which never uses a shell, and not harmless to a script expanding
   `$WKT_TREE` unquoted.
 - **It runs on the Claude Code worktree hook too**, which is the case it most
-  needs to serve: a tree a session opens should be ready to work in. Measured
-  on 2.1.239 that a `WorktreeCreate` hook running 399 seconds was not cut
-  short and its output was still read, so an install has room there. On that
+  needs to serve: a tree a session opens should be ready to work in. On that
   path a failing script is a warning and the exit stays 0 — a non-zero hook
   makes Claude Code refuse a tree that is built and usable, which is the one
-  outcome worse than the failed install.
+  outcome worse than a failed install.
+- **On the hook, wkt stops the script at eight minutes.** Measured on 2.1.239:
+  a `WorktreeCreate` hook running 399 seconds was untouched, and a longer one
+  was cancelled at 591 with `Hook cancelled` — leaving the session with no
+  worktree at all, though wkt had built one. A script wkt stops leaves a usable
+  tree and a warning instead. The command line keeps no deadline.
+- **`wkt post-create TASK`** runs the seam again on a task that already exists:
+  after a failure, after `--no-post-create`, or after the hook stopped it
+  short. Not a convenience — running the script by hand skips the back-fill
+  withdrawal, so the loop everyone writes would install into your own
+  repositories. The protection and its repair path are the same code.
 - Internally: a per-task lock, so an install that runs for minutes no longer
   holds the container lock and stops every other command in the workspace.
 

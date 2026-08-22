@@ -16,6 +16,7 @@
 package postcreate
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -23,6 +24,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
@@ -46,6 +49,16 @@ type Request struct {
 	// safe to run twice do only the new work the second time.
 	AddedRepo string
 	Out       io.Writer
+	// Timeout stops the script after this long. Zero means no deadline, which
+	// is the command line's default: nothing there imposes a ceiling, and
+	// killing a legitimate twenty-minute install is worse than waiting.
+	//
+	// The Claude Code worktree hook is the exception. Measured on 2.1.239: a
+	// hook was cancelled at 591 seconds — "Hook cancelled" — and the session
+	// got no worktree at all, though wkt had already built one. wkt has to
+	// finish first, because a script wkt stops leaves a usable tree and a
+	// warning, while one Claude Code stops leaves the session with nothing.
+	Timeout time.Duration
 }
 
 // Result reports what happened. ExitCode and Tail are meaningful only when the
@@ -129,7 +142,27 @@ func Run(req Request) (Result, error) {
 // is visibly alive, and Ctrl-C works.
 func run(path string, req Request) (Result, error) {
 	tail := &tailBuffer{limit: 4096}
-	cmd := exec.Command(path)
+	ctx := context.Background()
+	if req.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, path)
+	// Its own process group, killed as a group. A setup script spawns npm and
+	// git; killing only the shell leaves those running, and they hold the
+	// output pipe open, so Wait would block until they finished anyway —
+	// which is the deadline not being enforced at all.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// And a backstop: if something still holds the pipe, stop waiting for it
+	// rather than hanging past the ceiling this deadline exists to respect.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = req.TreeRoot
 	cmd.Stdout = io.MultiWriter(req.Out, tail)
 	cmd.Stderr = cmd.Stdout
@@ -148,6 +181,15 @@ func run(path string, req Request) (Result, error) {
 	if err == nil {
 		return Result{Ran: true}, nil
 	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return Result{Ran: true, Tail: tail.String()},
+			wkterr.New("WKT_POST_CREATE_TIMEOUT", "the post-create script ran out of time and was stopped").
+				WithPath(path).
+				WithFound(req.Timeout.String()).
+				WithDetail(tail.String()).
+				WithRemedy("the task was created and its tree is usable, but its setup did not finish",
+					"wkt post-create "+req.Task+" runs it again, without a deadline")
+	}
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		// Never started: a missing interpreter, or a file that is executable
@@ -163,7 +205,11 @@ func run(path string, req Request) (Result, error) {
 			WithPath(path).
 			WithFound("exit status "+strconv.Itoa(code)).
 			WithDetail(tail.String()).
-			WithRemedy("the task was created and its tree is usable; fix the script and run it yourself from "+req.TreeRoot,
+			WithRemedy("the task was created and its tree is usable; fix the script, then wkt post-create "+req.Task,
+				// Never "run it yourself": a hand-run script does not get the
+				// back-fill links withdrawn, so the loop everyone writes would
+				// install into the developer's own repositories — the hazard
+				// this package exists to close.
 				"or pass --no-post-create to skip it next time")
 }
 

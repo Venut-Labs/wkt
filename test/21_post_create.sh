@@ -8,7 +8,23 @@
 wt_init_env; trap wt_cleanup_env EXIT
 mk_repo docs || exit 1
 mk_repo services/svc-a || exit 1
-wt init >/dev/null || { fail "init"; summary 21; exit 1; }
+wt init >/dev/null || { fail "init"; # The verb runs it again on an existing task, with the same protections.
+cat > "$WS/.wkt/post-create" <<'EOS'
+#!/bin/sh
+for d in */; do touch "$d/late"; done
+echo "$WKT_REPOS" | while read -r r; do [ -n "$r" ] && touch "$r/late-set-up"; done
+EOS
+chmod +x "$WS/.wkt/post-create"
+wt new task-21c --repos services/svc-a --no-post-create >"$TMP/out3" 2>&1
+assert_eq "new --no-post-create exits 0" "$?" "0"
+TD3="$(head -1 "$TMP/out3")"
+assert_no_file "--no-post-create skipped the script" "$TD3/services/svc-a/late-set-up"
+wt post-create task-21c >"$TMP/pc" 2>&1
+assert_eq "wkt post-create exits 0" "$?" "0"
+assert_file "the verb ran the script" "$TD3/services/svc-a/late-set-up"
+assert_no_file "the verb kept the workspace out of reach" "$WS/docs/late"
+
+summary 21; exit 1; }
 
 WT_BIN="$(cd "$(dirname "$WT_CMD")" && pwd)/$(basename "$WT_CMD")"
 mkdir -p "$WS/.wkt"
@@ -62,5 +78,21 @@ TD2="$(head -1 "$TMP/out2")"
 assert_file "the tree is still there to go and fix" "$TD2"
 if grep -q "WKT_POST_CREATE_FAILED" "$TMP/err2"; then pass "the failure is named"; else fail "expected WKT_POST_CREATE_FAILED: $(cat "$TMP/err2")"; fi
 if grep -q "registry unreachable" "$TMP/err2"; then pass "the script's own words survive"; else fail "the script's output was discarded: $(cat "$TMP/err2")"; fi
+
+# The verb runs it again on an existing task, with the same protections.
+cat > "$WS/.wkt/post-create" <<'EOS'
+#!/bin/sh
+for d in */; do touch "$d/late"; done
+echo "$WKT_REPOS" | while read -r r; do [ -n "$r" ] && touch "$r/late-set-up"; done
+EOS
+chmod +x "$WS/.wkt/post-create"
+wt new task-21c --repos services/svc-a --no-post-create >"$TMP/out3" 2>&1
+assert_eq "new --no-post-create exits 0" "$?" "0"
+TD3="$(head -1 "$TMP/out3")"
+assert_no_file "--no-post-create skipped the script" "$TD3/services/svc-a/late-set-up"
+wt post-create task-21c >"$TMP/pc" 2>&1
+assert_eq "wkt post-create exits 0" "$?" "0"
+assert_file "the verb ran the script" "$TD3/services/svc-a/late-set-up"
+assert_no_file "the verb kept the workspace out of reach" "$WS/docs/late"
 
 summary 21

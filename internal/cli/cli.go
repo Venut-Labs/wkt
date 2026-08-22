@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/discover"
@@ -34,6 +35,7 @@ const usage = `wkt — one task, one branch, many repositories
   wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
   wkt new    TASK [--workspace DIR] [--repos a,b | --all] [--no-post-create]   (alias: create)
   wkt add    TASK --repos a,b [--workspace DIR] [--no-post-create]
+  wkt post-create TASK [--workspace DIR]
   wkt sync   TASK [--workspace DIR]
   wkt repair TASK [--workspace DIR]
   wkt fetch  TASK [--as NAME] [--workspace DIR]
@@ -319,7 +321,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		// into it.
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
 		if !*noSeam {
-			if err := runSeam(c, t, "", stderr); err != nil {
+			if err := runSeam(c, t, "", stderr, 0); err != nil {
 				return fail(stderr, err)
 			}
 		}
@@ -382,7 +384,37 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if loadErr != nil {
 			return fail(stderr, loadErr)
 		}
-		if err := runSeam(c, t, strings.Join(added, "\n"), stderr); err != nil {
+		if err := runSeam(c, t, strings.Join(added, "\n"), stderr, 0); err != nil {
+			return fail(stderr, err)
+		}
+		return 0
+
+	case "post-create":
+		// Running the seam again on a task that already exists: after a
+		// failure, after --no-post-create, or after the worktree hook stopped
+		// it short. It is not a convenience — a hand-run script does not get
+		// the back-fill links withdrawn, so the loop everyone writes would
+		// install into the developer's own repositories. The protection and
+		// its repair path have to be the same code.
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		t, err := state.Load(c.StateDir(), positional)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		taskLock, lockErr := container.LockTask(c, t.Name)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
+		// No deadline: nothing here imposes a ceiling, and this is the command
+		// someone reaches for precisely when the install needs longer.
+		if err := runSeam(c, t, "", stderr, 0); err != nil {
 			return fail(stderr, err)
 		}
 		return 0
@@ -539,7 +571,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			// is built and usable over a failed install is the one outcome
 			// worse than the failed install. There is no --no-post-create on
 			// this path, because Claude Code supplies the arguments.
-			if err := runSeam(c, t, "", stderr); err != nil {
+			if err := runSeam(c, t, "", stderr, hookSeamBudget); err != nil {
 				fmt.Fprintf(stderr, "warning: %s\n", wkterr.JSON(err))
 			}
 			return 0
@@ -928,7 +960,16 @@ func selection(entries []discover.Entry, repos string, all bool) []string {
 // otherwise install into the developer's own repositories. And the ignored
 // content that appears is recorded, so teardown reports it rather than
 // refusing on it and teaching --force.
-func runSeam(c container.C, t state.Task, addedRepo string, out io.Writer) error {
+// hookSeamBudget is how long the seam may run on the Claude Code worktree
+// hook. Measured on 2.1.239: a WorktreeCreate hook was cancelled at 591
+// seconds — "Hook cancelled" — and the session got no worktree at all, though
+// wkt had already built one. So wkt stops the script itself, with margin: a
+// script wkt stops leaves a usable tree and a warning, one Claude Code stops
+// leaves the session with nothing. A variable rather than a constant so a test
+// can shorten it; nothing else writes to it.
+var hookSeamBudget = 8 * time.Minute
+
+func runSeam(c container.C, t state.Task, addedRepo string, out io.Writer, budget time.Duration) error {
 	tree := c.TreePath(t.Name)
 	repos := make([]string, 0, len(t.Repos))
 	for _, r := range t.Repos {
@@ -944,7 +985,7 @@ func runSeam(c container.C, t state.Task, addedRepo string, out io.Writer) error
 	before := postcreate.Snapshot(tree, repos)
 	res, runErr := postcreate.Run(postcreate.Request{
 		Workspace: c.Workspace, TreeRoot: tree, Task: t.Name,
-		Repos: repos, AddedRepo: addedRepo, Out: out,
+		Repos: repos, AddedRepo: addedRepo, Out: out, Timeout: budget,
 	})
 	if !res.Ran {
 		return runErr

@@ -139,7 +139,14 @@ Three things worth knowing:
   exits non-zero; the tree, its branches and its store are all fine. Pass
   `--no-post-create` to skip the script entirely. On the Claude Code worktree
   hook, where there is no flag to pass, a failure is a warning and the session
-  still gets its tree.
+  still gets its tree — and the script is stopped after eight minutes, because
+  Claude Code cancels a hook at about ten and the session would then get no
+  tree at all.
+
+`wkt post-create TASK` runs the script again on a task that already exists.
+Use it rather than running the script yourself: by hand it does not get the
+back-fill links withdrawn, so the loop above would install into your own
+checkouts.
 
 What the script creates is remembered, so `wkt rm` treats it as disposable
 rather than as work at risk. A task name that is not letters, digits, dot,

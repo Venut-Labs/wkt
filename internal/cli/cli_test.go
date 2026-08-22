@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
@@ -1863,5 +1864,83 @@ func TestHookWorktreeCreateSurvivesAFailingSeam(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "registry unreachable") {
 		t.Fatalf("the script's own words must reach the session; got %q", errb.String())
+	}
+}
+
+// Without this verb the only way to finish a setup is to run the script by
+// hand — which is unsafe, because a hand-run script does not get the
+// back-fill links withdrawn, so the loop everyone writes installs into the
+// developer's own repositories. The protection and its only repair path have
+// to be the same code.
+func TestPostCreateVerbRunsTheSeamOnAnExistingTask(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\n"+
+		"for d in */; do touch \"$d/installed\"; done\n"+
+		"echo \"$WKT_REPOS\" | while read -r r; do [ -n \"$r\" ] && touch \"$r/set-up\"; done\n"+
+		"true\n")
+	var out, errb bytes.Buffer
+	if code := Run([]string{"new", "feat-later", "--repos", "services/svc-a", "--no-post-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	if _, err := os.Stat(filepath.Join(tree, "services", "svc-a", "set-up")); err == nil {
+		t.Fatal("--no-post-create should have skipped the script")
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"post-create", "feat-later", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("post-create exited %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(tree, "services", "svc-a", "set-up")); err != nil {
+		t.Fatal("the verb did not run the script")
+	}
+	// The same protection as every other path, which is the whole point.
+	if _, err := os.Stat(filepath.Join(ws, "docs", "installed")); err == nil {
+		t.Fatal("the verb let the script reach the developer's own repository")
+	}
+	info, err := os.Lstat(filepath.Join(tree, "docs"))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the back-fill link must be back after the verb")
+	}
+}
+
+func TestPostCreateVerbNeedsATaskName(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\ntrue\n")
+	var out, errb bytes.Buffer
+	if code := Run([]string{"post-create", "--workspace", ws}, &out, &errb); code != 2 {
+		t.Fatalf("a missing task name is a usage error; got %d", code)
+	}
+}
+
+// On the hook path wkt must finish before Claude Code cancels it: measured on
+// 2.1.239 that a hook cancelled at 591 seconds left the session with no
+// worktree at all, though wkt had built one. A script wkt stops leaves a
+// usable tree and a warning instead.
+func TestHookWorktreeCreateStopsALongScriptAndStillHandsOverTheTree(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\nsleep 60\ntouch \"$WKT_TREE/finished\"\n")
+	old := hookSeamBudget
+	hookSeamBudget = 300 * time.Millisecond
+	defer func() { hookSeamBudget = old }()
+
+	var out, errb bytes.Buffer
+	stdin = strings.NewReader(`{"session_id":"s","cwd":"` + ws + `","name":"feat-slow"}`)
+	defer func() { stdin = os.Stdin }()
+	start := time.Now()
+	code := Run([]string{"hook", "worktree-create", "--workspace", ws}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("the session must still get its tree: exit %d, stderr %s", code, errb.String())
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("the budget was not enforced: %s", elapsed)
+	}
+	tree := strings.TrimSpace(out.String())
+	if _, err := os.Stat(tree); err != nil {
+		t.Fatal("the tree must exist and be handed to the session")
+	}
+	if _, err := os.Stat(filepath.Join(tree, "finished")); err == nil {
+		t.Fatal("the script should have been stopped")
+	}
+	if !strings.Contains(errb.String(), "WKT_POST_CREATE_TIMEOUT") {
+		t.Fatalf("the session must be told the setup did not finish; got %q", errb.String())
 	}
 }
