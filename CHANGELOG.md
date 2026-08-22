@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — 2026-08-22
+
+A task tree can now run the services in it: the gitignored-file carry the
+design scoped in exists.
 
 - **The gitignored-file carry exists** (issue #3). The design scoped it in —
   "there is a `post-create` seam and a gitignored-file carry, and nothing
