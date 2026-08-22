@@ -80,9 +80,17 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 	perimeterOwned := ownedByWkt(c, t)
 	// Files wkt carried into the tree, by their tree-relative path.
 	carried := map[string]string{}
+	// Content the post-create script brought into being, by the same
+	// tree-relative path. No hash: the carry records one because it must tell
+	// an untouched copy from one the task edited, and produced content is
+	// disposable either way, so there is nothing for a hash to decide.
+	produced := map[string]bool{}
 	for _, l := range t.Links {
-		if l.Type == "carry" {
+		switch l.Type {
+		case "carry":
 			carried[filepath.Clean(filepath.FromSlash(l.RelPath))] = l.Hash
+		case "produced":
+			produced[filepath.Clean(filepath.FromSlash(l.RelPath))] = true
 		}
 	}
 	var out []Blocker
@@ -130,6 +138,16 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 				// does not, and section 8's copy check blocks on it.
 				if carriedUnchanged(carried, filepath.Join(r.RelPath, rel), filepath.Join(wt, rel)) {
 					out = append(out, Blocker{Code: "WKT_CARRIED", Repo: r.RelPath, Path: rel, Severity: "info"})
+					continue
+				}
+				// Content the post-create script made. It is generated, not
+				// the developer's, and blocking on it would make --force the
+				// habit for every task with a setup step — the habit this
+				// whole check exists to prevent. Still reported: passing over
+				// it in silence would hide the one case where the script
+				// wrote something that mattered.
+				if produced[filepath.Clean(filepath.Join(r.RelPath, rel))] {
+					out = append(out, Blocker{Code: "WKT_PRODUCED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
 				out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: rel})
