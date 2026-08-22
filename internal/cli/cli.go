@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/discover"
@@ -22,6 +23,7 @@ import (
 	"github.com/Venut-Labs/wkt/internal/hook"
 	"github.com/Venut-Labs/wkt/internal/paths"
 	"github.com/Venut-Labs/wkt/internal/perimeter"
+	"github.com/Venut-Labs/wkt/internal/postcreate"
 	"github.com/Venut-Labs/wkt/internal/state"
 	"github.com/Venut-Labs/wkt/internal/task"
 	"github.com/Venut-Labs/wkt/internal/tree"
@@ -31,8 +33,9 @@ import (
 const usage = `wkt — one task, one branch, many repositories
 
   wkt init   [--workspace DIR] [--dry-run] [--exclude a/inner,...]
-  wkt new    TASK [--workspace DIR] [--repos a,b | --all]   (alias: create)
-  wkt add    TASK --repos a,b [--workspace DIR]
+  wkt new    TASK [--workspace DIR] [--repos a,b | --all] [--no-post-create]   (alias: create)
+  wkt add    TASK --repos a,b [--workspace DIR] [--no-post-create]
+  wkt post-create TASK [--workspace DIR]
   wkt sync   TASK [--workspace DIR]
   wkt repair TASK [--workspace DIR]
   wkt fetch  TASK [--as NAME] [--workspace DIR]
@@ -80,11 +83,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var ws, repos, exclude, as *string
-	var all, force, dryRun, check, fix *bool
+	var all, force, dryRun, check, fix, noSeam *bool
 	nul := func() *string { v := ""; return &v }
 	nulB := func() *bool { v := false; return &v }
 	ws, repos, exclude, as = nul(), nul(), nul(), nul()
-	all, force, dryRun, check, fix = nulB(), nulB(), nulB(), nulB(), nulB()
+	all, force, dryRun, check, fix, noSeam = nulB(), nulB(), nulB(), nulB(), nulB(), nulB()
 
 	ws = fs.String("workspace", ".", "workspace directory")
 	switch cmd {
@@ -94,8 +97,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "new":
 		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths")
 		all = fs.Bool("all", false, "select every discovered repository")
+		noSeam = fs.Bool("no-post-create", false, "skip the workspace's post-create script")
 	case "add":
 		repos = fs.String("repos", "", "comma-separated workspace-relative repository paths to graft on")
+		noSeam = fs.Bool("no-post-create", false, "skip the workspace's post-create script")
 	case "fetch":
 		as = fs.String("as", "", "bring the branch in under another name")
 	case "rm":
@@ -274,7 +279,18 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		defer release()
+		// Released explicitly before the post-create seam rather than at the
+		// end of the verb: that script runs as long as an install takes, and
+		// holding the container across it would stop every other command in
+		// the workspace.
+		released := false
+		releaseContainer := func() {
+			if !released {
+				released = true
+				release()
+			}
+		}
+		defer releaseContainer()
 		entries, err := discover.Walk(c.Workspace, 4)
 		if err != nil {
 			return fail(stderr, err)
@@ -291,7 +307,24 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err) // fail() maps WKT_TASK_EXISTS to 2
 		}
+		// Taken before the container lock is dropped, so nothing can slip in
+		// between and act on a task whose links are about to be withdrawn.
+		taskLock, lockErr := container.LockTask(c, t.Name)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
+		releaseContainer()
+
+		// The path first, and unconditionally: a seam that fails still leaves
+		// a usable tree, and that is exactly when the developer needs to go
+		// into it.
 		fmt.Fprintln(stdout, c.TreePath(t.Name))
+		if !*noSeam {
+			if err := runSeam(c, t, "", stderr, 0); err != nil {
+				return fail(stderr, err)
+			}
+		}
 		return 0
 
 	case "add":
@@ -308,7 +341,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		defer release()
+		// Released explicitly before the seam, for the same reason as new.
+		released := false
+		releaseContainer := func() {
+			if !released {
+				released = true
+				release()
+			}
+		}
+		defer releaseContainer()
 		entries, err := discover.Walk(c.Workspace, 4)
 		if err != nil {
 			return fail(stderr, err)
@@ -317,11 +358,64 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
 				w.Code, w.Repo, w.Detail)
 		}
-		for _, rel := range splitList(*repos) {
+		added := splitList(*repos)
+		for _, rel := range added {
 			if err := task.Add(c, entries, positional, rel); err != nil {
 				return fail(stderr, err)
 			}
 			fmt.Fprintln(stdout, rel)
+		}
+		if *noSeam {
+			return 0
+		}
+		taskLock, lockErr := container.LockTask(c, positional)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
+		releaseContainer()
+
+		// task.Add returns only an error, so the grafted set is read back from
+		// state. Once for the whole command rather than once per repository:
+		// running someone's script twice for one invocation would be a
+		// surprise, and WKT_ADDED_REPO carries the newcomers the way WKT_REPOS
+		// carries the set.
+		t, loadErr := state.Load(c.StateDir(), positional)
+		if loadErr != nil {
+			return fail(stderr, loadErr)
+		}
+		if err := runSeam(c, t, strings.Join(added, "\n"), stderr, 0); err != nil {
+			return fail(stderr, err)
+		}
+		return 0
+
+	case "post-create":
+		// Running the seam again on a task that already exists: after a
+		// failure, after --no-post-create, or after the worktree hook stopped
+		// it short. It is not a convenience — a hand-run script does not get
+		// the back-fill links withdrawn, so the loop everyone writes would
+		// install into the developer's own repositories. The protection and
+		// its repair path have to be the same code.
+		if positional == "" {
+			fmt.Fprint(stderr, usage)
+			return 2
+		}
+		if err := requireContainer(c); err != nil {
+			return fail(stderr, err)
+		}
+		t, err := state.Load(c.StateDir(), positional)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		taskLock, lockErr := container.LockTask(c, t.Name)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
+		// No deadline: nothing here imposes a ceiling, and this is the command
+		// someone reaches for precisely when the install needs longer.
+		if err := runSeam(c, t, "", stderr, 0); err != nil {
+			return fail(stderr, err)
 		}
 		return 0
 
@@ -438,7 +532,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return fail(stderr, err)
 			}
-			defer release()
+			released := false
+			releaseContainer := func() {
+				if !released {
+					released = true
+					release()
+				}
+			}
+			defer releaseContainer()
 			entries, err := discover.Walk(c.Workspace, 4)
 			if err != nil {
 				return fail(stderr, err)
@@ -452,7 +553,27 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return fail(stderr, err)
 			}
+			taskLock, lockErr := container.LockTask(c, t.Name)
+			if lockErr != nil {
+				return fail(stderr, lockErr)
+			}
+			defer taskLock()
+			releaseContainer()
+
 			fmt.Fprintln(stdout, c.TreePath(t.Name))
+			// The tree a session opens is the case the seam most needs to
+			// serve, and there is room for it: measured on 2.1.239 that a
+			// WorktreeCreate hook running 399 seconds was not cut short and
+			// its output was still read.
+			//
+			// A failure is a warning here, not an exit code. A non-zero hook
+			// makes Claude Code refuse the worktree, and refusing a tree that
+			// is built and usable over a failed install is the one outcome
+			// worse than the failed install. There is no --no-post-create on
+			// this path, because Claude Code supplies the arguments.
+			if err := runSeam(c, t, "", stderr, hookSeamBudget); err != nil {
+				fmt.Fprintf(stderr, "warning: %s\n", wkterr.JSON(err))
+			}
 			return 0
 
 		case "worktree-remove":
@@ -829,6 +950,56 @@ func selection(entries []discover.Entry, repos string, all bool) []string {
 		}
 	}
 	return out // --all is the default when neither flag is given (spec §6)
+}
+
+// runSeam runs the workspace's post-create script for one task and records
+// what it produced.
+//
+// Two safety measures travel with it. The tree's back-fill symlinks are
+// withdrawn for the duration, because a script that walks the tree would
+// otherwise install into the developer's own repositories. And the ignored
+// content that appears is recorded, so teardown reports it rather than
+// refusing on it and teaching --force.
+// hookSeamBudget is how long the seam may run on the Claude Code worktree
+// hook. Measured on 2.1.239: a WorktreeCreate hook was cancelled at 591
+// seconds — "Hook cancelled" — and the session got no worktree at all, though
+// wkt had already built one. So wkt stops the script itself, with margin: a
+// script wkt stops leaves a usable tree and a warning, one Claude Code stops
+// leaves the session with nothing. A variable rather than a constant so a test
+// can shorten it; nothing else writes to it.
+var hookSeamBudget = 8 * time.Minute
+
+func runSeam(c container.C, t state.Task, addedRepo string, out io.Writer, budget time.Duration) error {
+	tree := c.TreePath(t.Name)
+	repos := make([]string, 0, len(t.Repos))
+	for _, r := range t.Repos {
+		repos = append(repos, r.RelPath)
+	}
+
+	restore, err := postcreate.WithdrawBackFill(tree, t.Links)
+	if err != nil {
+		return err
+	}
+	defer restore()
+
+	before := postcreate.Snapshot(tree, repos)
+	res, runErr := postcreate.Run(postcreate.Request{
+		Workspace: c.Workspace, TreeRoot: tree, Task: t.Name,
+		Repos: repos, AddedRepo: addedRepo, Out: out, Timeout: budget,
+	})
+	if !res.Ran {
+		return runErr
+	}
+	// Recorded even when the script failed: a half-finished install still
+	// leaves content behind, and refusing to remove the task over it would be
+	// the worst of both outcomes.
+	for _, p := range postcreate.NewSince(before, postcreate.Snapshot(tree, repos)) {
+		t.Links = append(t.Links, state.LinkSlot{RelPath: p, Type: "produced"})
+	}
+	if saveErr := state.Save(c.StateDir(), t); saveErr != nil && runErr == nil {
+		return saveErr
+	}
+	return runErr
 }
 
 func fail(stderr io.Writer, err error) int {

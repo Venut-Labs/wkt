@@ -189,3 +189,62 @@ func TestLockGivesUpEventually(t *testing.T) {
 		t.Fatalf("it waited %v, far past the deadline it was given", waited)
 	}
 }
+
+// TestTaskLockExcludesTheSameTaskAndNotAnother — the container lock is too
+// coarse for work that takes minutes. A post-create script may run for the
+// length of a dependency install, and holding the container across it would
+// stop every other command in the workspace, in a tool whose premise is many
+// tasks at once. It is also not optional: while that script runs the tree's
+// back-fill links are withdrawn, and a command arriving to find them missing
+// would report damage that is not there.
+func TestTaskLockExcludesTheSameTaskAndNotAnother(t *testing.T) {
+	base := t.TempDir()
+	c := C{Root: filepath.Join(base, "c"), Workspace: base}
+	if err := Create(c); err != nil {
+		t.Fatal(err)
+	}
+
+	release, err := LockTask(c, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LockTaskFor(c, "alpha", 0); err == nil {
+		release()
+		t.Fatal("a second lock on the same task must not be granted")
+	}
+	// A different task is unaffected: that other tasks proceed is the whole
+	// reason the container lock is released.
+	other, err := LockTaskFor(c, "beta", 0)
+	if err != nil {
+		release()
+		t.Fatalf("another task must still be lockable: %v", err)
+	}
+	other()
+	release()
+
+	again, err := LockTaskFor(c, "alpha", 0)
+	if err != nil {
+		t.Fatalf("the lock must be reusable after release: %v", err)
+	}
+	again()
+}
+
+// The container lock and a task lock are different locks: a task's own long
+// step must not exclude commands that touch nothing of its.
+func TestTaskLockDoesNotHoldTheContainer(t *testing.T) {
+	base := t.TempDir()
+	c := C{Root: filepath.Join(base, "c"), Workspace: base}
+	if err := Create(c); err != nil {
+		t.Fatal(err)
+	}
+	release, err := LockTask(c, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	container, err := LockFor(c, 0)
+	if err != nil {
+		t.Fatalf("the container must stay free while a task lock is held: %v", err)
+	}
+	container()
+}

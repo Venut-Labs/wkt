@@ -1389,3 +1389,106 @@ func TestForcedRemovalKeepsNothingWhenThereWasNothingToKeep(t *testing.T) {
 		t.Fatalf("nothing was at risk, so nothing should be kept: %q", out)
 	}
 }
+
+// TestRemoveTreatsProducedContentAsInformation — a local database the
+// post-create script made is disposable: it is not the developer's, it was
+// generated, and blocking on it would make --force the habit for every task
+// that runs a setup step. Which is the habit this check exists to prevent.
+func TestRemoveTreatsProducedContentAsInformation(t *testing.T) {
+	c, entries := fixture(t)
+	tk, err := Create(c, entries, "feat-prod", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := tk.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, ".gitignore"), []byte("*.sqlite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, wt, "add", "-A")
+	g(t, wt, "commit", "-qm", "ignore rules")
+	if err := os.WriteFile(filepath.Join(wt, "local.sqlite"), []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without the record it is precious ignored content and blocks.
+	blockers, err := Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" && strings.Contains(b.Path, "local.sqlite") {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatal("unrecorded ignored content must still block; the fixture is not exercising the case")
+	}
+
+	tk.Links = append(tk.Links, state.LinkSlot{RelPath: "docs/local.sqlite", Type: "produced"})
+	blockers, err = Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported bool
+	for _, b := range blockers {
+		if b.Code == "WKT_PRECIOUS_IGNORED" && strings.Contains(b.Path, "local.sqlite") {
+			t.Fatal("produced content must not block removal")
+		}
+		if b.Code == "WKT_PRODUCED" && b.Severity == "info" {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatal("produced content must still be reported, not silently passed over")
+	}
+}
+
+// The script can also write outside every repository — an intermediate
+// directory of the mirrored tree, or the tree root. Teardown meets that as
+// untracked tree content rather than as ignored content, so it needs the same
+// record. Found by the battery, not by design.
+func TestRemoveTreatsProducedTreeContentAsInformation(t *testing.T) {
+	c, entries := fixture(t)
+	tk, err := Create(c, entries, "feat-prod-tree", []string{"services/svc-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := c.TreePath(tk.Name)
+	beside := filepath.Join(tree, "services", "installed")
+	if err := os.WriteFile(beside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blockers, err := Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked bool
+	for _, b := range blockers {
+		if b.Code == "WKT_UNTRACKED_TREE_CONTENT" && strings.Contains(b.Path, "installed") {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatal("unrecorded tree content must still block; the fixture is not exercising the case")
+	}
+
+	tk.Links = append(tk.Links, state.LinkSlot{RelPath: "services/installed", Type: "produced"})
+	blockers, err = Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported bool
+	for _, b := range blockers {
+		if b.Code == "WKT_UNTRACKED_TREE_CONTENT" && strings.Contains(b.Path, "installed") {
+			t.Fatal("produced tree content must not block removal")
+		}
+		if b.Code == "WKT_PRODUCED" && strings.Contains(b.Path, "installed") && b.Severity == "info" {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatal("produced tree content must still be reported")
+	}
+}

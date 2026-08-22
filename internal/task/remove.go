@@ -80,9 +80,17 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 	perimeterOwned := ownedByWkt(c, t)
 	// Files wkt carried into the tree, by their tree-relative path.
 	carried := map[string]string{}
+	// Content the post-create script brought into being, by the same
+	// tree-relative path. No hash: the carry records one because it must tell
+	// an untouched copy from one the task edited, and produced content is
+	// disposable either way, so there is nothing for a hash to decide.
+	produced := map[string]bool{}
 	for _, l := range t.Links {
-		if l.Type == "carry" {
+		switch l.Type {
+		case "carry":
 			carried[filepath.Clean(filepath.FromSlash(l.RelPath))] = l.Hash
+		case "produced":
+			produced[filepath.Clean(filepath.FromSlash(l.RelPath))] = true
 		}
 	}
 	var out []Blocker
@@ -130,6 +138,16 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 				// does not, and section 8's copy check blocks on it.
 				if carriedUnchanged(carried, filepath.Join(r.RelPath, rel), filepath.Join(wt, rel)) {
 					out = append(out, Blocker{Code: "WKT_CARRIED", Repo: r.RelPath, Path: rel, Severity: "info"})
+					continue
+				}
+				// Content the post-create script made. It is generated, not
+				// the developer's, and blocking on it would make --force the
+				// habit for every task with a setup step — the habit this
+				// whole check exists to prevent. Still reported: passing over
+				// it in silence would hide the one case where the script
+				// wrote something that mattered.
+				if produced[filepath.Clean(filepath.Join(r.RelPath, rel))] {
+					out = append(out, Blocker{Code: "WKT_PRODUCED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
 				out = append(out, Blocker{Code: "WKT_PRECIOUS_IGNORED", Repo: r.RelPath, Path: rel})
@@ -209,6 +227,14 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 	linkRel := map[string]bool{}
 	copyHash := map[string]string{}
 	for _, slot := range t.Links {
+		// A "produced" entry is a record of what the post-create script made,
+		// not a slot the tree is built from. Counting it here would let the
+		// link-slot case in the walk swallow it silently, which is the one
+		// thing this check must not do: unrecognised content is reported
+		// either way, the only question is whether it blocks.
+		if slot.Type == "produced" {
+			continue
+		}
 		rel := filepath.FromSlash(slot.RelPath)
 		linkRel[rel] = true
 		if slot.Type == "copy" {
@@ -296,6 +322,14 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 						// stopping here is what made it invisible to the
 						// foreign-repo scan — so "wkt rm --force" deleted the
 						// only copy of its history (issue #1).
+					case produced[rel]:
+						// The post-create script wrote this, outside every
+						// repository — an intermediate directory of the
+						// mirrored tree, or the tree root. git cannot answer
+						// for it there, so the record is the only thing that
+						// can. Reported, never blocking, like its ignored
+						// counterpart inside a repository.
+						out = append(out, Blocker{Code: "WKT_PRODUCED", Path: p, Severity: "info"})
 					default:
 						out = append(out, Blocker{Code: "WKT_UNTRACKED_TREE_CONTENT", Path: p})
 						if d.IsDir() {
@@ -373,6 +407,12 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 
 	// 8: link slots whose type changed, and copies that diverged (H12, §5.3 r5).
 	for _, slot := range t.Links {
+		// Produced content is not a slot: wkt never built it and does not
+		// require it to still be there. Someone deleting what a setup script
+		// made is housekeeping, not damage.
+		if slot.Type == "produced" {
+			continue
+		}
 		p := filepath.Join(treeRoot, slot.RelPath)
 		info, err := os.Lstat(p)
 		if err != nil {

@@ -107,6 +107,52 @@ linked: editing a symlinked secret inside a task would write back into your own
 checkout. A carried file that the task has not changed does not block removal;
 one it has changed does.
 
+### Setting a tree up
+
+A tree arrives with its files and nothing run: no dependencies installed, no
+local database, no generated config. Put an executable `.wkt/post-create` at
+the workspace root and wkt runs it once the tree is built, on `wkt new` and
+again on `wkt add`:
+
+```sh
+#!/bin/sh
+echo "$WKT_REPOS" | while read -r repo; do
+  [ -f "$repo/package.json" ] && (cd "$repo" && npm install)
+done
+```
+
+It runs with the tree root as its working directory and your own environment,
+and it is told `WKT_TASK`, `WKT_TREE`, `WKT_WORKSPACE`, `WKT_REPOS`, and on
+`wkt add` also `WKT_ADDED_REPO`. Everything it prints goes to stderr, because
+`wkt new` prints exactly the tree path to stdout and nothing else.
+
+Three things worth knowing:
+
+- **Iterate `WKT_REPOS`, not the tree.** Repositories the task did not select
+  are symlinks into your workspace, so `for d in */` would install into your
+  own checkouts. wkt withdraws those links while the script runs and puts them
+  back afterwards, so the loop cannot reach them — which also means the script
+  cannot read an unselected repository.
+- **It must be safe to run twice**, because `wkt add` runs it again for the
+  whole tree. `WKT_ADDED_REPO` names what just arrived, if that helps.
+- **A failure leaves the task standing.** wkt prints what the script said and
+  exits non-zero; the tree, its branches and its store are all fine. Pass
+  `--no-post-create` to skip the script entirely. On the Claude Code worktree
+  hook, where there is no flag to pass, a failure is a warning and the session
+  still gets its tree — and the script is stopped after eight minutes, because
+  Claude Code cancels a hook at about ten and the session would then get no
+  tree at all.
+
+`wkt post-create TASK` runs the script again on a task that already exists.
+Use it rather than running the script yourself: by hand it does not get the
+back-fill links withdrawn, so the loop above would install into your own
+checkouts.
+
+What the script creates is remembered, so `wkt rm` treats it as disposable
+rather than as work at risk. A task name that is not letters, digits, dot,
+dash or underscore is refused before the script runs, because the name reaches
+it as `$WKT_TREE`.
+
 ## With Claude Code
 
 `claude --worktree` normally cuts a worktree from the one repository the

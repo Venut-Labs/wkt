@@ -89,10 +89,43 @@ func Lock(c C) (func(), error) { return LockFor(c, DefaultLockWait) }
 // fail-immediately behaviour, which is what a test wants when it is checking
 // that the lock excludes at all.
 func LockFor(c C, wait time.Duration) (func(), error) {
-	path := filepath.Join(c.Root, ".wkt.lock")
+	return flockPath(filepath.Join(c.Root, ".wkt.lock"), "container lock", wait)
+}
+
+// LockTask takes a lock scoped to one task, waiting up to DefaultLockWait.
+//
+// The container lock is too coarse for work that runs for minutes. A
+// post-create script may take as long as a dependency install, and holding the
+// container across it would stop every other command in the workspace — in a
+// tool whose premise is many tasks at once. Nor is a task lock merely an
+// optimisation: while that script runs the tree's back-fill links are
+// withdrawn, and a command arriving to find them missing would report damage
+// that is not there.
+//
+// The name is a single path segment: task.Validate refuses a separator, and
+// the hook path narrows it further through hook.Slug.
+func LockTask(c C, name string) (func(), error) { return LockTaskFor(c, name, DefaultLockWait) }
+
+// LockTaskFor is LockTask with an explicit deadline. A zero wait fails
+// immediately, which is what a test wants when it is checking that the lock
+// excludes at all.
+func LockTaskFor(c C, name string, wait time.Duration) (func(), error) {
+	// Beside the state files rather than among them: state.List reads that
+	// directory, and a lock file sitting there would read as a task.
+	dir := filepath.Join(c.Root, "locks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, wkterr.New("WKT_CONTAINER_UNUSABLE", "cannot create the lock directory").
+			WithPath(dir).WithFound(err.Error())
+	}
+	return flockPath(filepath.Join(dir, name+".lock"), "lock on this task", wait)
+}
+
+// flockPath is the locking both locks share: open, poll for the flock until
+// the deadline, stamp the holder's pid, and hand back a release.
+func flockPath(path, subject string, wait time.Duration) (func(), error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, wkterr.New("WKT_CONTAINER_UNUSABLE", "cannot open the container lock").
+		return nil, wkterr.New("WKT_CONTAINER_UNUSABLE", "cannot open the "+subject).
 			WithPath(path).WithFound(err.Error())
 	}
 
@@ -105,7 +138,7 @@ func LockFor(c C, wait time.Duration) (func(), error) {
 		if !time.Now().Before(deadline) {
 			holder, _ := os.ReadFile(path)
 			_ = f.Close()
-			return nil, wkterr.New("WKT_LOCKED", "another wkt process holds the container lock").
+			return nil, wkterr.New("WKT_LOCKED", "another wkt process holds the "+subject).
 				WithPath(path).WithFound(string(holder)).
 				WithRemedy("wait for it to finish",
 					"or remove the lock file if no wkt process is running")
