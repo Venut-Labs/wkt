@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+The `post-create` seam: the last thing the design promised and had never
+built. §1.1 says "there is a `post-create` seam and a gitignored-file carry,
+and nothing else" — the carry shipped in v0.5.0, and this is the other half.
+
+- **A tree can set itself up.** An executable `.wkt/post-create` at the
+  workspace root runs once the tree is built, on `wkt new` and again on `wkt
+  add`, with the tree root as its working directory and `WKT_TASK`,
+  `WKT_TREE`, `WKT_WORKSPACE`, `WKT_REPOS` and `WKT_ADDED_REPO` describing
+  what it is setting up. Its output is streamed to stderr, so `wkt new` still
+  prints exactly the tree path to stdout and the Claude Code worktree hook
+  still works.
+- **A failing script leaves the task standing.** wkt exits non-zero and
+  carries the script's own words in the error rather than a guess at them —
+  the reader is usually an agent, and an exit status alone is nothing it can
+  act on. `--no-post-create` skips the script.
+- **Back-fill links are withdrawn while it runs.** Measured: a repository the
+  task did not select is a symlink into the workspace, and writing through it
+  lands in the developer's own checkout — so the `for d in */` loop everyone
+  writes would install into their working repositories. Closed by construction
+  rather than by a warning, because the dangerous script is the one written
+  without thinking.
+- **What the script produces does not make removal demand `--force`.**
+  Measured: a gitignored `local.sqlite` blocked `wkt rm` and pointed at
+  `--force`. The seam exists to produce exactly that kind of content, and
+  reflexive `--force` is the habit teardown's refusals exist to prevent.
+- **A task name is checked before it reaches the script.** Measured: `wkt new`
+  accepts `a;b`, `a$b` and backticked names, all legal branches — harmless to
+  wkt, which never uses a shell, and not harmless to a script expanding
+  `$WKT_TREE` unquoted.
+- Internally: a per-task lock, so an install that runs for minutes no longer
+  holds the container lock and stops every other command in the workspace.
+
 ## v0.5.1 — 2026-08-22
 
 `wkt fetch` worked exactly once per task, and three collision checks let git

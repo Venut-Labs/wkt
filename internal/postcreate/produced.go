@@ -1,6 +1,8 @@
 package postcreate
 
 import (
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,6 +27,7 @@ import (
 // it, which is the behaviour that already exists.
 func Snapshot(treeRoot string, repos []string) map[string]bool {
 	out := map[string]bool{}
+	walkTree(treeRoot, repos, out)
 	for _, rel := range repos {
 		dir := filepath.Join(treeRoot, filepath.FromSlash(rel))
 		s, err := gitx.Run(dir, "status", "--porcelain", "--ignored=matching")
@@ -39,6 +42,44 @@ func Snapshot(treeRoot string, repos []string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// walkTree records what lies in the tree outside every repository.
+//
+// A script can write there — an intermediate directory of the mirrored tree,
+// or the tree root itself — and teardown blocks on it as untracked tree
+// content rather than as ignored content, so git cannot answer for it. Found
+// by the battery: the "for d in */" idiom touches the mirrored tree's own
+// directories, not only the repositories inside them.
+//
+// The paths are tree-relative, which is the same vocabulary the repository
+// half produces and the same one teardown's walk uses.
+//
+// Symlinks are never followed, and never recorded: a back-fill link belongs to
+// the workspace, and what lies beyond it is not the tree's to dispose of.
+func walkTree(treeRoot string, repos []string, out map[string]bool) {
+	inRepo := func(rel string) bool {
+		for _, r := range repos {
+			if rel == r || strings.HasPrefix(rel, r+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	_ = filepath.WalkDir(treeRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == treeRoot {
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(p, treeRoot+string(filepath.Separator)))
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if inRepo(rel) {
+			return fs.SkipDir // git answers for everything below a repository
+		}
+		out[rel] = true
+		return nil
+	})
 }
 
 // NewSince returns what the script brought into being, sorted so that state

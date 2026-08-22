@@ -92,3 +92,37 @@ func TestNewSinceIsSortedSoStateIsStable(t *testing.T) {
 		}
 	}
 }
+
+// A script can write outside every repository — an intermediate directory of
+// the mirrored tree, or the tree root itself. Teardown blocks on that as
+// untracked tree content, so the snapshot has to see it too. Found by the
+// battery: "for d in */" touches the mirrored tree's own directories.
+func TestSnapshotSeesContentOutsideEveryRepository(t *testing.T) {
+	tree := t.TempDir()
+	repoIn(t, tree, filepath.Join("services", "svc-a"), "*.sqlite\n")
+
+	before := Snapshot(tree, []string{"services/svc-a"})
+
+	// Beside the repository, not in it.
+	if err := os.WriteFile(filepath.Join(tree, "services", "installed"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "root-level.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Snapshot(tree, []string{"services/svc-a"})
+	for _, want := range []string{"services/installed", "root-level.log"} {
+		if !got[want] {
+			t.Fatalf("%q must be recorded; got %v", want, got)
+		}
+		if before[want] {
+			t.Fatalf("%q must not be in the before snapshot", want)
+		}
+	}
+	// The repository's own contents stay git's business: recording them from
+	// the filesystem as well would speak a vocabulary teardown does not read.
+	if got["services/svc-a/.gitignore"] {
+		t.Fatalf("tracked repository content must not be recorded; got %v", got)
+	}
+}
