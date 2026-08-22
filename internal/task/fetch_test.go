@@ -141,3 +141,46 @@ func TestFetchIsIdempotent(t *testing.T) {
 }
 
 var _ = state.Repo{}
+
+// TestFetchTwiceBringsTheSecondRoundOfWork — the ordinary rhythm of using the
+// tool: fetch what is done, keep working, fetch again. The second call is a
+// plain fast-forward, and it was refused as a divergence because the ancestry
+// question went to the workspace repository, which has never seen the task's
+// newer commit. The developer was told to bring it in under another name or to
+// merge the two by hand, for a fast-forward git would have taken without
+// comment.
+func TestFetchTwiceBringsTheSecondRoundOfWork(t *testing.T) {
+	c, entries := fixture(t)
+	tk, err := Create(c, entries, "feat-again", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := tk.Repos[0].WorktreePath
+	commit := func(file, body string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(wt, file), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		g(t, wt, "add", "-A")
+		g(t, wt, "commit", "-qm", "work "+file)
+		return strings.TrimSpace(g(t, wt, "rev-parse", "HEAD"))
+	}
+
+	commit("a.md", "first\n")
+	if _, err := Fetch(c, "feat-again", ""); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	want := commit("b.md", "second\n")
+
+	results, err := Fetch(c, "feat-again", "")
+	if err != nil {
+		t.Fatalf("the second fetch is a fast-forward and must be taken: %v", err)
+	}
+	if len(results) != 1 || !results[0].Updated {
+		t.Fatalf("the second round of work should have arrived: %+v", results)
+	}
+	got := strings.TrimSpace(g(t, filepath.Join(c.Workspace, "docs"), "rev-parse", "refs/heads/feat-again"))
+	if got != want {
+		t.Fatalf("workspace is at %s, the task is at %s", got, want)
+	}
+}

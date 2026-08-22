@@ -1,6 +1,7 @@
 package task
 
 import (
+	"errors"
 	"path/filepath"
 
 	"github.com/Venut-Labs/wkt/internal/container"
@@ -45,6 +46,18 @@ func Fetch(c container.C, name, as string) ([]FetchResult, error) {
 	plans := make([]plan, 0, len(t.Repos))
 	for _, r := range t.Repos {
 		storePath := filepath.Join(c.StoreDir(), r.StoreID+".git")
+		// A branch that cannot coexist with the target is invisible to the
+		// lookup below: rev-parse of "feat" reports nothing when "feat/42"
+		// holds the path. Without this the plan was made, the first
+		// repository's ref moved, and the set failed on a later one — the
+		// half-a-task outcome this whole loop exists to prevent.
+		if b := dfConflict(r.AbsPath, target); b != "" {
+			return nil, wkterr.New("WKT_BRANCH_DF_CONFLICT",
+				"the workspace repository holds a branch that cannot coexist with this name").
+				WithRepo(r.RelPath).WithPath(r.AbsPath).WithFound(b).
+				WithRemedy("wkt fetch "+name+" --as <name> brings it in under another name",
+					"or delete "+b+" in that repository")
+		}
 		sha, err := gitx.Run(storePath, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
 		if err != nil || sha == "" {
 			// The task has no branch here yet — nothing was committed in this
@@ -61,7 +74,15 @@ func Fetch(c container.C, name, as string) ([]FetchResult, error) {
 			// Fast-forward means the workspace's commit is an ancestor of the
 			// task's. Anything else would need --force, which this command
 			// does not have and will not grow.
-			if !gitx.RunOK(r.AbsPath, "merge-base", "--is-ancestor", existing, sha) {
+			//
+			// Asked in the store, not in the workspace repository: the task's
+			// commit does not exist there, so merge-base failed on an unknown
+			// object and every second fetch — an ordinary fast-forward after
+			// more work — was refused as a divergence. The store is the one
+			// place that can answer, and its answer is complete: it holds
+			// everything reachable from the task's branch, so a commit it does
+			// not have cannot be an ancestor of one it does.
+			if !gitx.RunOK(storePath, "merge-base", "--is-ancestor", existing, sha) {
 				return nil, wkterr.New("WKT_NOT_FAST_FORWARD",
 					"the branch in the workspace is not an ancestor of the task's").
 					WithRepo(r.RelPath).
@@ -88,8 +109,12 @@ func Fetch(c container.C, name, as string) ([]FetchResult, error) {
 		// which is the behaviour we want.
 		if _, err := gitx.Run(p.repo.AbsPath, "fetch", "--quiet", storePath,
 			"refs/heads/"+name+":refs/heads/"+target); err != nil {
+			// git's own words, not a guess at them: the remedy below is the
+			// common cause, and printing it alone told everyone who hit any
+			// other cause to do something irrelevant.
 			return out, wkterr.New("WKT_FETCH_FAILED", "cannot bring the branch into the workspace repository").
 				WithRepo(p.repo.RelPath).WithPath(p.repo.AbsPath).
+				WithFound(gitReason(err)).
 				WithRemedy("if the branch is checked out there, switch away from it first")
 		}
 		out = append(out, FetchResult{
@@ -98,6 +123,16 @@ func Fetch(c container.C, name, as string) ([]FetchResult, error) {
 		})
 	}
 	return out, nil
+}
+
+// gitReason recovers git's explanation from a wrapped gitx error, so a
+// refusal wkt cannot classify still tells the developer what git said.
+func gitReason(err error) string {
+	var e *wkterr.E
+	if errors.As(err, &e) && e.Found != "" {
+		return e.Found
+	}
+	return err.Error()
 }
 
 func short(sha string) string {

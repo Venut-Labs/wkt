@@ -83,38 +83,26 @@ func Validate(c container.C, entries []discover.Entry, name string, selected []s
 			return nil, wkterr.New("WKT_BRANCH_EXISTS", "a branch of that name already exists").
 				WithRepo(rel).WithRemedy("choose another task name", "or delete the branch")
 		}
+		if bad := collisionIn(e.AbsPath, name); bad != nil {
+			return nil, bad.WithRepo(rel).
+				WithRemedy("choose another task name", "or delete the branch that is in the way")
+		}
 		// Task branches actually live in the store (since Task 6). A store may
 		// already exist for this repository — from a task whose state was lost
-		// but whose store survived — carrying the branch even though the
-		// workspace repository does not. Check there too, when a store
-		// directory already exists; a store with no directory yet simply
-		// skips this half.
+		// but whose store survived — carrying a branch even though the workspace
+		// repository does not, so every question asked above is asked again of
+		// the place the branch is really created. A store with no directory yet
+		// simply skips this half.
 		storePath := filepath.Join(c.StoreDir(), store.ID(rel, e.AbsPath)+".git")
 		if _, statErr := os.Stat(storePath); statErr == nil {
 			if gitx.RunOK(storePath, "rev-parse", "--verify", "refs/heads/"+name) {
 				return nil, wkterr.New("WKT_BRANCH_EXISTS", "a branch of that name already exists").
 					WithRepo(rel).WithRemedy("choose another task name", "or delete the branch")
 			}
-		}
-		// Case-fold collision, checked on every platform so macOS and Linux agree.
-		if out, err := gitx.Run(e.AbsPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"); err == nil {
-			for _, b := range strings.Split(out, "\n") {
-				if b != "" && strings.EqualFold(b, name) {
-					return nil, wkterr.New("WKT_BRANCH_CASE_COLLISION", "a branch differing only in case exists").
-						WithRepo(rel).WithFound(b)
-				}
-			}
-		}
-		// D/F conflict: refs/heads/feat and refs/heads/feat/42 cannot coexist.
-		if out, err := gitx.Run(e.AbsPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"); err == nil {
-			for _, b := range strings.Split(out, "\n") {
-				if b == "" {
-					continue
-				}
-				if strings.HasPrefix(b, name+"/") || strings.HasPrefix(name, b+"/") {
-					return nil, wkterr.New("WKT_BRANCH_DF_CONFLICT", "a branch name conflicts hierarchically").
-						WithRepo(rel).WithFound(b)
-				}
+			if bad := collisionIn(storePath, name); bad != nil {
+				return nil, bad.WithRepo(rel).WithPath(storePath).
+					WithRemedy("a store left by an earlier task still holds a branch in the way",
+						"choose another task name, or run wkt doctor to see what the container holds")
 			}
 		}
 		sha, ref, err := resolveBase(e.AbsPath)

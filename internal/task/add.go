@@ -202,11 +202,20 @@ func validateOne(c container.C, r state.Repo, name string, pathIsBackFill bool) 
 		return wkterr.New("WKT_BRANCH_EXISTS", "a branch of that name already exists").
 			WithRepo(r.RelPath).WithRemedy("delete the branch, or use a different task")
 	}
+	if bad := collisionIn(r.AbsPath, name); bad != nil {
+		return bad.WithRepo(r.RelPath).
+			WithRemedy("delete the branch that is in the way, or use a different task")
+	}
 	storePath := filepath.Join(c.StoreDir(), r.StoreID+".git")
 	if _, err := os.Stat(storePath); err == nil {
 		if gitx.RunOK(storePath, "rev-parse", "--verify", "refs/heads/"+name) {
 			return wkterr.New("WKT_BRANCH_EXISTS", "a branch of that name already exists in the store").
 				WithRepo(r.RelPath).WithRemedy("wkt doctor lists what the container is holding")
+		}
+		if bad := collisionIn(storePath, name); bad != nil {
+			return bad.WithRepo(r.RelPath).WithPath(storePath).
+				WithRemedy("a store left by an earlier task still holds a branch in the way",
+					"wkt doctor lists what the container is holding")
 		}
 	}
 	if _, err := os.Lstat(r.WorktreePath); err == nil && !pathIsBackFill {

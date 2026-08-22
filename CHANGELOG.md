@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.5.1 — 2026-08-22
+
+`wkt fetch` worked exactly once per task, and three collision checks let git
+fail from the middle of an operation that had already changed things.
+
+- **`wkt fetch` can be run more than once.** The ordinary rhythm — fetch what
+  is done, keep working, fetch again — was refused on the second call with
+  `WKT_NOT_FAST_FORWARD`, and the developer was told to bring the branch in
+  under another name or merge the two by hand, for a fast-forward git would
+  have taken without comment. The ancestry question was asked in the workspace
+  repository, which has never seen the task's newer commit, so `merge-base`
+  failed on an unknown object and the failure was read as divergence. It is
+  asked in the store now: the store holds everything reachable from the task's
+  branch, so a commit it does not have cannot be an ancestor of one it does.
+- **A hierarchical collision is refused before any ref moves.** `refs/heads/feat`
+  and `refs/heads/feat/42` cannot coexist, and the second is invisible to a
+  lookup of the first — `rev-parse feat` reports nothing when `feat/42` holds
+  the path. `fetch` checks the whole set before moving anything precisely so a
+  developer is never left holding half a task; this slipped past that check, so
+  the first repository's ref moved and a later one failed.
+- **`wkt new` and `wkt add` ask the store, not only the workspace.** A store
+  outlives the task that built it: state can be lost while the store keeps
+  every branch it ever held, so the developer's repository can look clear while
+  the place the branch is actually created is not. `add` had no hierarchical or
+  case check at all. Both now refuse with `WKT_BRANCH_DF_CONFLICT` or
+  `WKT_BRANCH_CASE_COLLISION`, naming the branch in the way, before a store is
+  built or a base pin written.
+- **A refusal wkt cannot classify carries git's own words.** `WKT_FETCH_FAILED`
+  discarded git's explanation and printed one guess in its place — "if the
+  branch is checked out there, switch away from it first" — which was simply
+  wrong for every other cause.
+
 ## v0.5.0 — 2026-08-22
 
 A task tree can now run the services in it: the gitignored-file carry the
