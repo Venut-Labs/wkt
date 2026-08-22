@@ -137,7 +137,9 @@ Three things worth knowing:
   whole tree. `WKT_ADDED_REPO` names what just arrived, if that helps.
 - **A failure leaves the task standing.** wkt prints what the script said and
   exits non-zero; the tree, its branches and its store are all fine. Pass
-  `--no-post-create` to skip the script entirely.
+  `--no-post-create` to skip the script entirely. On the Claude Code worktree
+  hook, where there is no flag to pass, a failure is a warning and the session
+  still gets its tree.
 
 What the script creates is remembered, so `wkt rm` treats it as disposable
 rather than as work at risk. A task name that is not letters, digits, dot,

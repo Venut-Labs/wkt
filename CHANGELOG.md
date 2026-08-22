@@ -31,6 +31,13 @@ and nothing else" — the carry shipped in v0.5.0, and this is the other half.
   accepts `a;b`, `a$b` and backticked names, all legal branches — harmless to
   wkt, which never uses a shell, and not harmless to a script expanding
   `$WKT_TREE` unquoted.
+- **It runs on the Claude Code worktree hook too**, which is the case it most
+  needs to serve: a tree a session opens should be ready to work in. Measured
+  on 2.1.239 that a `WorktreeCreate` hook running 399 seconds was not cut
+  short and its output was still read, so an install has room there. On that
+  path a failing script is a warning and the exit stays 0 — a non-zero hook
+  makes Claude Code refuse a tree that is built and usable, which is the one
+  outcome worse than the failed install.
 - Internally: a per-task lock, so an install that runs for minutes no longer
   holds the container lock and stops every other command in the workspace.
 

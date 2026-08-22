@@ -500,7 +500,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return fail(stderr, err)
 			}
-			defer release()
+			released := false
+			releaseContainer := func() {
+				if !released {
+					released = true
+					release()
+				}
+			}
+			defer releaseContainer()
 			entries, err := discover.Walk(c.Workspace, 4)
 			if err != nil {
 				return fail(stderr, err)
@@ -514,7 +521,27 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return fail(stderr, err)
 			}
+			taskLock, lockErr := container.LockTask(c, t.Name)
+			if lockErr != nil {
+				return fail(stderr, lockErr)
+			}
+			defer taskLock()
+			releaseContainer()
+
 			fmt.Fprintln(stdout, c.TreePath(t.Name))
+			// The tree a session opens is the case the seam most needs to
+			// serve, and there is room for it: measured on 2.1.239 that a
+			// WorktreeCreate hook running 399 seconds was not cut short and
+			// its output was still read.
+			//
+			// A failure is a warning here, not an exit code. A non-zero hook
+			// makes Claude Code refuse the worktree, and refusing a tree that
+			// is built and usable over a failed install is the one outcome
+			// worse than the failed install. There is no --no-post-create on
+			// this path, because Claude Code supplies the arguments.
+			if err := runSeam(c, t, "", stderr); err != nil {
+				fmt.Fprintf(stderr, "warning: %s\n", wkterr.JSON(err))
+			}
 			return 0
 
 		case "worktree-remove":

@@ -1817,3 +1817,51 @@ func TestAddNoPostCreateSkipsTheSeam(t *testing.T) {
 		}
 	}
 }
+
+// The hook is the case the seam most needs to serve: a tree a Claude Code
+// session opens should be ready to work in. Measured on 2.1.239 that a
+// WorktreeCreate hook is not cut short — one ran 399 seconds and its output
+// was still read — so a dependency install has room there.
+func TestHookWorktreeCreateRunsTheSeam(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\ntouch \"$WKT_TREE/ran\"\n")
+	var out, errb bytes.Buffer
+	stdin = strings.NewReader(`{"session_id":"s","cwd":"` + ws + `","name":"feat-hook"}`)
+	defer func() { stdin = os.Stdin }()
+	if code := Run([]string{"hook", "worktree-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("hook exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	if n := strings.Count(strings.TrimRight(out.String(), "\n"), "\n"); n != 0 {
+		t.Fatalf("stdout must hold exactly the tree path; got %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(tree, "ran")); err != nil {
+		t.Fatal("the seam did not run on the hook path")
+	}
+}
+
+// A non-zero hook makes Claude Code refuse a tree that is built and usable,
+// so on this path a failing script is a warning and the exit stays 0. That is
+// the one place the hook differs from the command line.
+func TestHookWorktreeCreateSurvivesAFailingSeam(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\necho 'registry unreachable' >&2\nexit 3\n")
+	var out, errb bytes.Buffer
+	stdin = strings.NewReader(`{"session_id":"s","cwd":"` + ws + `","name":"feat-hook-fail"}`)
+	defer func() { stdin = os.Stdin }()
+	code := Run([]string{"hook", "worktree-create", "--workspace", ws}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("a failing seam must not fail the hook: exit %d, stderr %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	if _, err := os.Stat(tree); err != nil {
+		t.Fatal("the tree must exist and be handed to the session")
+	}
+	if n := strings.Count(strings.TrimRight(out.String(), "\n"), "\n"); n != 0 {
+		t.Fatalf("stdout must still hold exactly the tree path; got %q", out.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_POST_CREATE_FAILED") {
+		t.Fatalf("the failure must be reported on stderr; got %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "registry unreachable") {
+		t.Fatalf("the script's own words must reach the session; got %q", errb.String())
+	}
+}
