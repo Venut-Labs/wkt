@@ -339,7 +339,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		defer release()
+		// Released explicitly before the seam, for the same reason as new.
+		released := false
+		releaseContainer := func() {
+			if !released {
+				released = true
+				release()
+			}
+		}
+		defer releaseContainer()
 		entries, err := discover.Walk(c.Workspace, 4)
 		if err != nil {
 			return fail(stderr, err)
@@ -348,11 +356,34 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "warning: %s %s carries the submodule %q; wkt rm will refuse to remove this task, --force included\n",
 				w.Code, w.Repo, w.Detail)
 		}
-		for _, rel := range splitList(*repos) {
+		added := splitList(*repos)
+		for _, rel := range added {
 			if err := task.Add(c, entries, positional, rel); err != nil {
 				return fail(stderr, err)
 			}
 			fmt.Fprintln(stdout, rel)
+		}
+		if *noSeam {
+			return 0
+		}
+		taskLock, lockErr := container.LockTask(c, positional)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
+		releaseContainer()
+
+		// task.Add returns only an error, so the grafted set is read back from
+		// state. Once for the whole command rather than once per repository:
+		// running someone's script twice for one invocation would be a
+		// surprise, and WKT_ADDED_REPO carries the newcomers the way WKT_REPOS
+		// carries the set.
+		t, loadErr := state.Load(c.StateDir(), positional)
+		if loadErr != nil {
+			return fail(stderr, loadErr)
+		}
+		if err := runSeam(c, t, strings.Join(added, "\n"), stderr); err != nil {
+			return fail(stderr, err)
 		}
 		return 0
 

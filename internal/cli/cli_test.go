@@ -1765,3 +1765,55 @@ func TestNewProtectsTheWorkspaceFromAWalkingScript(t *testing.T) {
 		t.Fatal("it must come back as a symlink")
 	}
 }
+
+// A repository grafted in later would otherwise stay unconfigured, which is
+// the gap the seam exists to close. It runs once for the whole command, with
+// the newcomers named, because running a script twice for one invocation
+// would be a surprise.
+func TestAddRunsTheSeamAndNamesTheNewRepository(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\nprintf '%s' \"$WKT_ADDED_REPO\" > \"$WKT_TREE/added\"\n")
+	var out, errb bytes.Buffer
+	if code := Run([]string{"new", "feat-add", "--repos", "docs", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	// The create run wrote an empty file; the add run must overwrite it.
+	if got, err := os.ReadFile(filepath.Join(tree, "added")); err != nil || strings.TrimSpace(string(got)) != "" {
+		t.Fatalf("on create the variable must be empty; got %q (%v)", got, err)
+	}
+	out.Reset()
+	errb.Reset()
+
+	if code := Run([]string{"add", "feat-add", "--repos", "services/svc-a", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("add exited %d: %s", code, errb.String())
+	}
+	got, err := os.ReadFile(filepath.Join(tree, "added"))
+	if err != nil {
+		t.Fatal("the seam did not run on add")
+	}
+	if strings.TrimSpace(string(got)) != "services/svc-a" {
+		t.Fatalf("WKT_ADDED_REPO must name the newcomer; got %q", got)
+	}
+}
+
+func TestAddNoPostCreateSkipsTheSeam(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\ntouch \"$WKT_TREE/ran-$WKT_ADDED_REPO\"\n")
+	var out, errb bytes.Buffer
+	if code := Run([]string{"new", "feat-add-skip", "--repos", "docs", "--no-post-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	out.Reset()
+	if code := Run([]string{"add", "feat-add-skip", "--repos", "services/svc-a", "--no-post-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("add exited %d: %s", code, errb.String())
+	}
+	entries, err := os.ReadDir(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "ran-") {
+			t.Fatalf("--no-post-create must skip the script on add too; found %s", e.Name())
+		}
+	}
+}

@@ -41,7 +41,10 @@ type Request struct {
 	TreeRoot  string
 	Task      string
 	Repos     []string // materialised repositories, workspace-relative
-	AddedRepo string   // set by add, empty on create
+	// AddedRepo names what wkt add just grafted on, newline-separated the way
+	// Repos is, and is empty on create. It is what lets a script that must be
+	// safe to run twice do only the new work the second time.
+	AddedRepo string
 	Out       io.Writer
 }
 
