@@ -50,7 +50,10 @@ func Sync(c container.C, name string) ([]SyncReport, error) {
 				// Discarding this is how a store that has never once reached
 				// its upstream reported "up to date": the answer sync must not
 				// give when it did not manage to look.
-				unreachable = firstLineOf(err.Error())
+				// git's own words, not wkt's wrapper: err.Error() renders as
+				// "WKT_GIT_FAILED: git fetch failed (fatal: ...)", leading with
+				// a code the reader already knows and burying the reason.
+				unreachable = gitReason(err)
 			}
 		}
 		if err := store.FetchWorkspace(storePath); err != nil {
@@ -130,10 +133,4 @@ func countBetween(storePath, base, tip string) int {
 		return 0
 	}
 	return n
-}
-
-// firstLineOf keeps a reason to one line, the same constraint every other
-// error surface in wkt has.
-func firstLineOf(s string) string {
-	return strings.SplitN(strings.TrimSpace(s), "\n", 2)[0]
 }

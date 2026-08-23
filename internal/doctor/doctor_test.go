@@ -334,3 +334,33 @@ func TestFixNeverTouchesAnUnfinishedStore(t *testing.T) {
 		t.Fatalf("--fix changed the store's contents: %d entries, was %d", len(after), len(before))
 	}
 }
+
+// doctor is the command a WKT_STORE_INCOMPLETE refusal tells you to run, so
+// the two must agree on what an unfinished store is. They did not: store's
+// own check also flags an origin still pointing at the developer's clone,
+// doctor's copy did not, so the one store wkt new refuses was reported
+// healthy by the one command that exists to explain it.
+func TestDoctorAgreesWithTheStoreOnWhatIsIncomplete(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := task.Create(c, entries, "feat-store", []string{"svc-a"}); err != nil {
+		t.Fatal(err)
+	}
+	stores, err := os.ReadDir(c.StoreDir())
+	if err != nil || len(stores) == 0 {
+		t.Fatalf("expected a store: %v", err)
+	}
+	sp := filepath.Join(c.StoreDir(), stores[0].Name())
+
+	// Complete in every other way, and unmarked, so only this can be the
+	// reason: origin points back at the workspace repository.
+	g(t, sp, "config", "--unset", "wkt.storecomplete")
+	g(t, sp, "config", "remote.origin.url", filepath.Join(c.Workspace, "svc-a"))
+
+	found, err := Run(c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(found, "WKT_STORE_INCOMPLETE") {
+		t.Fatalf("doctor must report the store wkt refuses; it reported %v", codes(found))
+	}
+}

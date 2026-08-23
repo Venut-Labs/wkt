@@ -278,3 +278,31 @@ func TestSyncIsSilentAboutAnUpstreamThatDoesNotExist(t *testing.T) {
 		}
 	}
 }
+
+// The reason a store could not be reached is git's, not wkt's wrapper around
+// it. firstLineOf was applied to err.Error(), which renders as
+// "WKT_GIT_FAILED: git fetch failed (fatal: ...)" — so the report led with
+// wkt's own code and buried what git said inside parentheses.
+func TestSyncReportsGitsReasonNotWktsWrapper(t *testing.T) {
+	c, entries := fixture(t)
+	if _, err := Create(c, entries, "feat-unreach", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
+	tk, err := state.Load(c.StateDir(), "feat-unreach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(c.StoreDir(), tk.Repos[0].StoreID+".git")
+	g(t, storePath, "config", "remote.origin.url", filepath.Join(t.TempDir(), "gone.git"))
+
+	reports, err := Sync(c, "feat-unreach")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Unreachable == "" {
+		t.Fatalf("an origin that cannot be consulted must be reported: %+v", reports)
+	}
+	if strings.Contains(reports[0].Unreachable, "WKT_GIT_FAILED") {
+		t.Fatalf("the reason must be git's own words, not wkt's wrapper: %q", reports[0].Unreachable)
+	}
+}

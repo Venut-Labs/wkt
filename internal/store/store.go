@@ -139,6 +139,13 @@ func stamp(sp, repoAbs string) error {
 
 // invariants returns everything about a store that is not as spec §5.2
 // requires, in language a person can act on.
+// Invariants is exported because doctor has to answer the same question. A
+// WKT_STORE_INCOMPLETE refusal tells the user to run wkt doctor, so the two
+// must not have separate opinions about what "incomplete" means — they did,
+// and the store whose origin still pointed at the developer's clone was
+// refused by one and called healthy by the other.
+func Invariants(sp, repoAbs string) []string { return invariants(sp, repoAbs) }
+
 func invariants(sp, repoAbs string) []string {
 	var problems []string
 	if _, err := os.Stat(filepath.Join(sp, "objects", "info", "alternates")); err == nil {
@@ -167,6 +174,11 @@ func invariants(sp, repoAbs string) []string {
 // lowercases config key names, so it is written and read in the form git
 // stores it.
 const markerKey = "wkt.storecomplete"
+
+// MarkerKey is markerKey for the same reason Invariants is exported: doctor
+// reads the marker, and a second spelling of it in another package is a
+// divergence waiting to happen.
+const MarkerKey = markerKey
 
 // adoptable decides whether an existing store may be reused.
 //

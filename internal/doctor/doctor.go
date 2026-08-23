@@ -17,6 +17,7 @@ import (
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/gitx"
 	"github.com/Venut-Labs/wkt/internal/state"
+	"github.com/Venut-Labs/wkt/internal/store"
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
@@ -218,22 +219,22 @@ func checkStores(c container.C) []Finding {
 			continue
 		}
 		sp := filepath.Join(c.StoreDir(), e.Name())
-		if v, err := gitx.Run(sp, "config", "--get", "wkt.storecomplete"); err == nil && strings.TrimSpace(v) != "" {
+		if v, err := gitx.Run(sp, "config", "--get", store.MarkerKey); err == nil && strings.TrimSpace(v) != "" {
 			continue
 		}
-		var missing []string
-		if _, err := os.Stat(filepath.Join(sp, "objects", "info", "alternates")); err == nil {
-			missing = append(missing, "borrows objects from the workspace repository")
+		// The same question the store asks itself, asked the same way. This
+		// used to be a second copy of the checks, and the copies had already
+		// diverged: a store whose origin still pointed at the developer's
+		// clone was refused by wkt new and called healthy here — by the one
+		// command the refusal tells people to run.
+		//
+		// The workspace repository comes from the store's own workspace
+		// remote, which is the only record of where it was built from.
+		repoAbs := ""
+		if v, err := gitx.Run(sp, "config", "--get", "remote.workspace.url"); err == nil {
+			repoAbs = strings.TrimSpace(v)
 		}
-		if v, err := gitx.Run(sp, "config", "--get", "core.hooksPath"); err != nil || strings.TrimSpace(v) == "" {
-			missing = append(missing, "hooks are live")
-		}
-		if v, err := gitx.Run(sp, "config", "--get", "gc.auto"); err != nil || strings.TrimSpace(v) != "0" {
-			missing = append(missing, "gc is not disabled")
-		}
-		if v, err := gitx.Run(sp, "config", "--get", "remote.workspace.url"); err != nil || strings.TrimSpace(v) == "" {
-			missing = append(missing, "no workspace remote")
-		}
+		missing := store.Invariants(sp, repoAbs)
 		if len(missing) == 0 {
 			continue // complete, merely unmarked: an earlier version built it
 		}
