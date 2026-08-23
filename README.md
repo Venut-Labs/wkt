@@ -170,6 +170,10 @@ refusals on that path too: `WorktreeRemove` will not delete a tree holding
 uncommitted work or unpushed commits, and says why on stderr, where Claude
 Code shows it to you.
 
+If a repository carries its own `.claude/settings.json`, wkt leaves it alone
+and does not cover that directory — it says so on stderr rather than
+overwriting your configuration or refusing to build the task.
+
 ## What it does not promise
 
 - **Not a security boundary**, and **no read-only workspace in v0**: an agent

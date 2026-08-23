@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **A repository with its own `.claude/settings.json` no longer blocks the
+  task.** Measured: `wkt new` failed outright with `WKT_PERIMETER_FOREIGN` and
+  rolled the tree back, so a workspace holding one such repository — a common
+  shape — could not be used at all, while the refusal's own remedy offered to
+  "leave it and accept that this directory has no wkt perimeter", an option
+  the tool did not provide. That directory is now skipped and named on stderr
+  as `WKT_PERIMETER_SKIPPED`; the file is untouched and the rest of the tree
+  is covered as before.
+
 ## v0.6.0 — 2026-08-23
 
 The `post-create` seam: the last thing the design promised and had never

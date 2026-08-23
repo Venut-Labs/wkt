@@ -1944,3 +1944,52 @@ func TestHookWorktreeCreateStopsALongScriptAndStillHandsOverTheTree(t *testing.T
 		t.Fatalf("the session must be told the setup did not finish; got %q", errb.String())
 	}
 }
+
+// Skipping a directory is only acceptable if wkt says so. Silence would make
+// partial coverage exactly what the old refusal was written to avoid:
+// coverage that is only sometimes true, with nobody the wiser.
+func TestNewNamesTheDirectoriesItCouldNotCover(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "docs"))
+	own := filepath.Join(ws, "docs", ".claude")
+	if err := os.MkdirAll(own, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mine := []byte(`{"permissions":{"allow":["Bash(make *)"]}}`)
+	if err := os.WriteFile(filepath.Join(own, "settings.json"), mine, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "own settings"}} {
+		full := append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)
+		cmd := exec.Command("git", full...)
+		cmd.Dir = filepath.Join(ws, "docs")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "feat-own", "--repos", "docs", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("a repository with its own settings must not fail the task: %d %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+	if _, err := os.Stat(filepath.Join(tree, "docs")); err != nil {
+		t.Fatal("the tree must still be built")
+	}
+	if !strings.Contains(errb.String(), "WKT_PERIMETER_SKIPPED") {
+		t.Fatalf("the uncovered directory must be named on stderr; got %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "docs") {
+		t.Fatalf("and named specifically; got %q", errb.String())
+	}
+	back, _ := os.ReadFile(filepath.Join(tree, "docs", ".claude", "settings.json"))
+	if string(back) != string(mine) {
+		t.Fatal("the repository's own settings were overwritten in the tree")
+	}
+}

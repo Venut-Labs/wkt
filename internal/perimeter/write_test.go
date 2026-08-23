@@ -2,7 +2,6 @@ package perimeter
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/Venut-Labs/wkt/internal/container"
 	"github.com/Venut-Labs/wkt/internal/state"
-	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
 // treeFixture builds a container with a real task tree on disk: one
@@ -112,12 +110,18 @@ func TestWriteNeverFollowsABackFillLink(t *testing.T) {
 	}
 }
 
-// TestWriteRefusesToClobberSettingsItDoesNotOwn — a repository may carry its
-// own .claude/settings.json, checked into git. Overwriting it silently would
-// destroy the user's configuration.
-func TestWriteRefusesToClobberSettingsItDoesNotOwn(t *testing.T) {
+// TestWriteSkipsSettingsItDoesNotOwnAndCoversTheRest — a repository may carry
+// its own .claude/settings.json, checked into git, and plenty do. Overwriting
+// it would destroy the user's configuration; refusing the whole task over it
+// made wkt unusable on such a repository, and the refusal's own advice —
+// "leave it and accept that this directory has no wkt perimeter" — named an
+// option the tool did not offer. Partial coverage is not new: a back-filled
+// repository is deliberately uncovered, and a session started deeper has none
+// at all (H6a).
+func TestWriteSkipsSettingsItDoesNotOwnAndCoversTheRest(t *testing.T) {
 	c, task := treeFixture(t)
-	repo := filepath.Join(c.TreePath("feat-42"), "services", "svc-a")
+	tree := c.TreePath("feat-42")
+	repo := filepath.Join(tree, "services", "svc-a")
 	if err := os.MkdirAll(filepath.Join(repo, ".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -126,20 +130,36 @@ func TestWriteRefusesToClobberSettingsItDoesNotOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := Write(c, task, nil)
-	if err == nil {
-		t.Fatal("a settings file wkt did not write must not be overwritten")
+	coverage, hashes, err := Write(c, task, nil)
+	if err != nil {
+		t.Fatalf("a repository with its own settings must not fail the task: %v", err)
 	}
-	var e *wkterr.E
-	if !errors.As(err, &e) || e.Code != "WKT_PERIMETER_FOREIGN" {
-		t.Fatalf("want WKT_PERIMETER_FOREIGN, got %v", err)
+	for _, dir := range coverage {
+		if dir == repo {
+			t.Fatal("the directory wkt does not own must not be reported as covered")
+		}
 	}
-	if !strings.Contains(e.Path, "svc-a") {
-		t.Fatalf("the refusal must name the file it protected: %+v", e)
+	if _, ours := hashes[repo]; ours {
+		t.Fatal("and no hash may be recorded for it")
+	}
+	// The tree root is still covered, which is the point of not refusing.
+	var rootCovered bool
+	for _, dir := range coverage {
+		if dir == tree {
+			rootCovered = true
+		}
+	}
+	if !rootCovered {
+		t.Fatalf("the rest of the tree must still be covered; coverage was %v", coverage)
 	}
 	back, _ := os.ReadFile(filepath.Join(repo, ".claude", "settings.json"))
 	if string(back) != string(mine) {
-		t.Fatal("the user's settings file was modified by a refused write")
+		t.Fatal("the user's settings file was modified")
+	}
+	// And the caller has to be able to say so.
+	skipped := Skipped(c, task, coverage)
+	if len(skipped) != 1 || skipped[0] != repo {
+		t.Fatalf("the skipped directory must be reportable; got %v", skipped)
 	}
 }
 
@@ -257,20 +277,36 @@ func TestWriteAdoptsItsOwnMarkedFileWhenStateForgot(t *testing.T) {
 	}
 }
 
-// TestWriteStillRefusesAnUnmarkedFile is the other half: adoption keys on the
-// marker, not on the filename, so the user's own settings are still safe.
-func TestWriteStillRefusesAnUnmarkedFile(t *testing.T) {
+// TestWriteStillLeavesAnUnmarkedFileAlone is the other half: adoption keys on
+// the marker, not on the filename, so the user's own settings are still safe.
+// Safe now means untouched and uncovered rather than refused — the file is
+// what has to survive, not the whole task.
+func TestWriteStillLeavesAnUnmarkedFileAlone(t *testing.T) {
 	c, task := treeFixture(t)
-	dir := filepath.Join(c.TreePath("feat-42"), ".claude")
+	tree := c.TreePath("feat-42")
+	dir := filepath.Join(tree, ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Valid JSON, plausibly a settings file, but not wkt's.
-	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
-		[]byte(`{"permissions":{"deny":["Edit(//tmp/**)"]}}`), 0o644); err != nil {
+	mine := []byte(`{"permissions":{"deny":["Edit(//tmp/**)"]}}`)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), mine, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Write(c, task, nil); err == nil {
-		t.Fatal("a settings file without wkt's marker must still be refused")
+	coverage, _, err := Write(c, task, nil)
+	if err != nil {
+		t.Fatalf("the task must still be buildable: %v", err)
+	}
+	back, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if string(back) != string(mine) {
+		t.Fatal("the user's own settings file was overwritten")
+	}
+	for _, d := range coverage {
+		if d == tree {
+			t.Fatal("a directory wkt did not write must not be claimed as covered")
+		}
+	}
+	if skipped := Skipped(c, task, coverage); len(skipped) == 0 {
+		t.Fatal("and the omission must be reportable")
 	}
 }

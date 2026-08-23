@@ -309,6 +309,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		// Taken before the container lock is dropped, so nothing can slip in
 		// between and act on a task whose links are about to be withdrawn.
+		warnUncovered(c, t, stderr)
 		taskLock, lockErr := container.LockTask(c, t.Name)
 		if lockErr != nil {
 			return fail(stderr, lockErr)
@@ -384,6 +385,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if loadErr != nil {
 			return fail(stderr, loadErr)
 		}
+		warnUncovered(c, t, stderr)
 		if err := runSeam(c, t, strings.Join(added, "\n"), stderr, 0); err != nil {
 			return fail(stderr, err)
 		}
@@ -553,6 +555,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return fail(stderr, err)
 			}
+			warnUncovered(c, t, stderr)
 			taskLock, lockErr := container.LockTask(c, t.Name)
 			if lockErr != nil {
 				return fail(stderr, lockErr)
@@ -961,6 +964,19 @@ func selection(entries []discover.Entry, repos string, all bool) []string {
 		}
 	}
 	return out // --all is the default when neither flag is given (spec §6)
+}
+
+// warnUncovered names the directories a task's perimeter left out.
+//
+// wkt skips a directory holding a settings file it did not write, rather than
+// refusing the whole task over it — repositories carry their own
+// .claude/settings.json in git often enough that refusing locked people out.
+// But coverage that is only sometimes true is worse than none when nobody
+// says so, and that is the whole reason this exists.
+func warnUncovered(c container.C, t state.Task, stderr io.Writer) {
+	for _, dir := range perimeter.Skipped(c, t, t.PerimeterCoverage) {
+		fmt.Fprintf(stderr, "warning: WKT_PERIMETER_SKIPPED %s already has a settings file wkt did not write, so this directory has no wkt perimeter; move it aside and run wkt perimeter %s to cover it\n", dir, t.Name)
+	}
 }
 
 // runSeam runs the workspace's post-create script for one task and records

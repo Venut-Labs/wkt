@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -59,18 +60,33 @@ func Write(c container.C, t state.Task, siblings []string) ([]string, map[string
 
 	dirs := coveredDirs(c, t)
 
-	// Check every destination before writing any of them: a refusal halfway
-	// through would leave the tree half-covered, and coverage that is only
-	// sometimes true is worse than none.
+	// Decide about every destination before writing any of them, so a
+	// half-written tree is not a thing that can happen. A directory wkt does
+	// not own is skipped rather than refused: repositories carry their own
+	// .claude/settings.json in git often enough that refusing made wkt
+	// unusable on them, and the refusal's own advice — leave it and accept
+	// that this directory has no perimeter — named an option the tool did not
+	// offer. Partial coverage is not new here: a back-filled repository is
+	// deliberately uncovered, and a session started deeper has none at all
+	// (H6a). What the caller must do is say which directories were left out;
+	// see Skipped.
+	writable := make([]string, 0, len(dirs))
 	for _, dir := range dirs {
-		if err := checkOwned(dir, t); err != nil {
-			return nil, nil, err
+		err := checkOwned(dir, t)
+		if err == nil {
+			writable = append(writable, dir)
+			continue
 		}
+		var e *wkterr.E
+		if errors.As(err, &e) && e.Code == "WKT_PERIMETER_FOREIGN" {
+			continue // not wkt's to manage; the rest of the tree still is
+		}
+		return nil, nil, err
 	}
 
-	coverage := make([]string, 0, len(dirs))
-	hashes := make(map[string]string, len(dirs))
-	for _, dir := range dirs {
+	coverage := make([]string, 0, len(writable))
+	hashes := make(map[string]string, len(writable))
+	for _, dir := range writable {
 		if err := writeAtomic(settingsPath(dir), body); err != nil {
 			return nil, nil, err
 		}
@@ -78,6 +94,25 @@ func Write(c container.C, t state.Task, siblings []string) ([]string, map[string
 		hashes[dir] = hash
 	}
 	return coverage, hashes, nil
+}
+
+// Skipped names the directories a perimeter write left out — the ones holding
+// a settings file wkt did not write. Coverage that is only sometimes true is
+// worse than none *when nobody says so*, so this is what makes the omission
+// visible: callers warn with it, and status reports it from the recorded
+// coverage.
+func Skipped(c container.C, t state.Task, coverage []string) []string {
+	covered := make(map[string]bool, len(coverage))
+	for _, d := range coverage {
+		covered[d] = true
+	}
+	var out []string
+	for _, dir := range coveredDirs(c, t) {
+		if !covered[dir] {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // checkOwned refuses when a settings file exists that wkt did not write. A
