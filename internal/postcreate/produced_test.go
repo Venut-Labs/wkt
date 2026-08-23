@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,34 @@ func TestSnapshotSeesContentOutsideEveryRepository(t *testing.T) {
 	// the filesystem as well would speak a vocabulary teardown does not read.
 	if got["services/svc-a/.gitignore"] {
 		t.Fatalf("tracked repository content must not be recorded; got %v", got)
+	}
+}
+
+// The seam's whole job is running installers, and an installer at the tree
+// root makes a node_modules with a hundred thousand files in it. The
+// repository half relies on git collapsing such a directory to one line; the
+// tree half has to do the same, or every one of those files becomes a
+// permanent entry in the task's state.
+func TestABuildDirectoryOutsideARepositoryIsRecordedWhole(t *testing.T) {
+	tree := t.TempDir()
+	repoIn(t, tree, "svc", "*.sqlite\n")
+	deep := filepath.Join(tree, "node_modules", "pkg", "dist")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"a.js", "b.js", "c.js"} {
+		if err := os.WriteFile(filepath.Join(deep, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := Snapshot(tree, []string{"svc"})
+	if !got["node_modules"] {
+		t.Fatalf("the directory itself must be recorded; got %v", got)
+	}
+	for k := range got {
+		if strings.HasPrefix(k, "node_modules/") {
+			t.Fatalf("nothing below it may be recorded; got %q", k)
+		}
 	}
 }

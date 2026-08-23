@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Venut-Labs/wkt/internal/artifact"
 	"github.com/Venut-Labs/wkt/internal/gitx"
 )
 
@@ -78,6 +79,15 @@ func walkTree(treeRoot string, repos []string, out map[string]bool) {
 			return fs.SkipDir // git answers for everything below a repository
 		}
 		out[rel] = true
+		// Collapse a build directory the way git collapses a wholly ignored
+		// one. The seam exists to run installers, and an installer at the tree
+		// root leaves a node_modules with a hundred thousand files in it;
+		// without this each becomes a permanent entry in the task's state, and
+		// the walk runs twice per seam. Teardown already treats these as
+		// regenerable whole.
+		if d.IsDir() && artifact.IsRegenerable(rel) {
+			return fs.SkipDir
+		}
 		return nil
 	})
 }

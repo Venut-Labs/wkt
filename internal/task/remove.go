@@ -146,7 +146,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 				// whole check exists to prevent. Still reported: passing over
 				// it in silence would hide the one case where the script
 				// wrote something that mattered.
-				if produced[filepath.Clean(filepath.Join(r.RelPath, rel))] {
+				if producedExempt(produced, filepath.Join(r.RelPath, rel), rel) {
 					out = append(out, Blocker{Code: "WKT_PRODUCED", Repo: r.RelPath, Path: rel, Severity: "info"})
 					continue
 				}
@@ -322,7 +322,7 @@ func Preflight(c container.C, t state.Task) ([]Blocker, error) {
 						// stopping here is what made it invisible to the
 						// foreign-repo scan — so "wkt rm --force" deleted the
 						// only copy of its history (issue #1).
-					case produced[rel]:
+					case producedExempt(produced, rel, rel):
 						// The post-create script wrote this, outside every
 						// repository — an intermediate directory of the
 						// mirrored tree, or the tree root. git cannot answer
@@ -791,6 +791,28 @@ func keepUnpushed(storePath string, r state.Repo, task string) (Kept, bool) {
 
 // carriedUnchanged reports whether this ignored path is a file wkt carried in
 // that still matches what it copied.
+// producedExempt reports whether an ignored path may be passed over because
+// the post-create script made it.
+//
+// A file, yes: it was generated, and a service rewriting its own database is
+// expected — hashing it the way the carry does would put --force back into
+// everyone's habits, which is what this exemption exists to prevent.
+//
+// A directory, no. git collapses a wholly ignored directory to one line, so
+// exempting ".secrets/" by path exempts every file created inside it
+// afterwards, and a key dropped in there would be deleted without a word.
+// Only the artifact allowlist exempts a directory, which is a deliberate,
+// enumerated list rather than whatever a script happened to create.
+func producedExempt(produced map[string]bool, key, reported string) bool {
+	if !produced[filepath.Clean(filepath.FromSlash(key))] {
+		return false
+	}
+	if strings.HasSuffix(reported, "/") || strings.HasSuffix(reported, string(filepath.Separator)) {
+		return artifact.IsRegenerable(reported)
+	}
+	return true
+}
+
 func carriedUnchanged(carried map[string]string, treeRel, abs string) bool {
 	want, ok := carried[filepath.Clean(treeRel)]
 	if !ok || want == "" {

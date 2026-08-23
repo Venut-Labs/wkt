@@ -1492,3 +1492,54 @@ func TestRemoveTreatsProducedTreeContentAsInformation(t *testing.T) {
 		t.Fatal("produced tree content must still be reported")
 	}
 }
+
+// A produced directory collapses to one line in git's reporting, so exempting
+// it by path exempts everything created inside it afterwards. The script made
+// an ignored directory; a developer then drops a key in there, and a plain
+// wkt rm would delete it without a word. A produced *file* is different: it
+// was generated, and a service rewriting its own database is expected.
+func TestAProducedDirectoryDoesNotExemptWhatIsPutInItLater(t *testing.T) {
+	c, entries := fixture(t)
+	tk, err := Create(c, entries, "feat-secrets", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := tk.Repos[0].WorktreePath
+	if err := os.WriteFile(filepath.Join(wt, ".gitignore"), []byte(".secrets/\n*.sqlite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g(t, wt, "add", "-A")
+	g(t, wt, "commit", "-qm", "ignore rules")
+	if err := os.MkdirAll(filepath.Join(wt, ".secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".secrets", "prod.pem"), []byte("KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "local.sqlite"), []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tk.Links = append(tk.Links,
+		state.LinkSlot{RelPath: "docs/.secrets/", Type: "produced"},
+		state.LinkSlot{RelPath: "docs/local.sqlite", Type: "produced"})
+
+	blockers, err := Preflight(c, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirBlocks, fileExempt bool
+	for _, b := range blockers {
+		if strings.Contains(b.Path, ".secrets") && b.Severity != "info" {
+			dirBlocks = true
+		}
+		if strings.Contains(b.Path, "local.sqlite") && b.Code == "WKT_PRODUCED" && b.Severity == "info" {
+			fileExempt = true
+		}
+	}
+	if !dirBlocks {
+		t.Fatal("a produced directory must not exempt what was put in it later")
+	}
+	if !fileExempt {
+		t.Fatal("a produced file is still disposable; blocking on it brings --force back as a habit")
+	}
+}

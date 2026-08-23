@@ -46,6 +46,16 @@ and nothing else" — the carry shipped in v0.5.0, and this is the other half.
   short. Not a convenience — running the script by hand skips the back-fill
   withdrawal, so the loop everyone writes would install into your own
   repositories. The protection and its repair path are the same code.
+- **A produced directory no longer exempts what is put in it later.** git
+  collapses a wholly ignored directory to one line, so recording `.secrets/`
+  as produced would have exempted a key dropped in there afterwards, and a
+  plain `wkt rm` would have deleted it. A produced *file* stays disposable —
+  a service rewriting its own database is expected, and blocking on that
+  brings `--force` back as a habit.
+- **A build directory outside a repository is recorded whole.** An installer
+  run at the tree root leaves a `node_modules` with a hundred thousand files;
+  each would have become a permanent entry in the task's state. The tree half
+  now collapses it the way git already collapses the repository half.
 - Internally: a per-task lock, so an install that runs for minutes no longer
   holds the container lock and stops every other command in the workspace.
 
