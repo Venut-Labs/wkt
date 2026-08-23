@@ -853,6 +853,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 		defer release()
+		// And this task's own lock. A post-create script releases the
+		// container and runs for minutes; without this, a removal walks in
+		// mid-setup, deletes the tree under a running script, and the seam's
+		// own state write then puts the record back. Reproduced before this
+		// line existed. The refusal names the task, which is the honest
+		// answer: interrupt the setup first.
+		taskLock, lockErr := container.LockTask(c, positional)
+		if lockErr != nil {
+			return fail(stderr, lockErr)
+		}
+		defer taskLock()
 		kept, err := task.Remove(c, positional, *force)
 		if err != nil {
 			return fail(stderr, err)
@@ -990,13 +1001,32 @@ func runSeam(c container.C, t state.Task, addedRepo string, out io.Writer, budge
 	if !res.Ran {
 		return runErr
 	}
+	produced := postcreate.NewSince(before, postcreate.Snapshot(tree, repos))
+	if len(produced) == 0 {
+		return runErr
+	}
+
+	// Re-read the task before writing it. Minutes may have passed with the
+	// container lock released for all of them, so the value captured before
+	// the script is stale: a concurrent wkt new refreshing this task's
+	// perimeter, or a graft that landed meanwhile, would be silently reverted
+	// by writing the old snapshot back. Reproduced: a wkt add during the seam
+	// left a real worktree on disk that state no longer knew about, and the
+	// task could not then be removed by any wkt command, --force included.
+	//
+	// A task that is gone stays gone. Recording what a script produced is not
+	// a reason to bring back a record someone deleted.
+	fresh, loadErr := state.Load(c.StateDir(), t.Name)
+	if loadErr != nil {
+		return runErr
+	}
 	// Recorded even when the script failed: a half-finished install still
 	// leaves content behind, and refusing to remove the task over it would be
 	// the worst of both outcomes.
-	for _, p := range postcreate.NewSince(before, postcreate.Snapshot(tree, repos)) {
-		t.Links = append(t.Links, state.LinkSlot{RelPath: p, Type: "produced"})
+	for _, p := range produced {
+		fresh.Links = append(fresh.Links, state.LinkSlot{RelPath: p, Type: "produced"})
 	}
-	if saveErr := state.Save(c.StateDir(), t); saveErr != nil && runErr == nil {
+	if saveErr := state.Save(c.StateDir(), fresh); saveErr != nil && runErr == nil {
 		return saveErr
 	}
 	return runErr

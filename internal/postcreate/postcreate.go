@@ -21,9 +21,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -160,8 +162,11 @@ func run(path string, req Request) (Result, error) {
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	// And a backstop: if something still holds the pipe, stop waiting for it
-	// rather than hanging past the ceiling this deadline exists to respect.
+	// And a backstop: if something still holds the output pipe after the script
+	// itself is done, stop waiting for it. A setup script's ordinary last act
+	// is to leave something running — a dev server, "docker compose up -d", a
+	// watcher — and that child inherits the pipe, so without this wkt would
+	// wait for the dev server to exit.
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = req.TreeRoot
 	cmd.Stdout = io.MultiWriter(req.Out, tail)
@@ -177,7 +182,44 @@ func run(path string, req Request) (Result, error) {
 		"WKT_ADDED_REPO="+req.AddedRepo,
 	)
 
+	// Signals reach wkt, not the script. The script has its own process group,
+	// so the terminal's Ctrl-C never gets there — and wkt dying on the spot
+	// would skip the caller's restore of the tree's back-fill links, leaving
+	// the tree missing them with nothing to say so. Take the signal, pass it
+	// on, and let the run end normally so the cleanup happens on the way out.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	var interrupted atomic.Bool
+	watched := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			interrupted.Store(true)
+			// Hand wkt's own disposition back immediately: a second Ctrl-C
+			// from someone who has lost patience should kill wkt outright
+			// rather than be swallowed here.
+			signal.Stop(sigs)
+			if cmd.Process != nil {
+				if s, ok := sig.(syscall.Signal); ok {
+					_ = syscall.Kill(-cmd.Process.Pid, s)
+				}
+			}
+		case <-watched:
+		}
+	}()
+
 	err := cmd.Run()
+	close(watched)
+
+	if interrupted.Load() {
+		return Result{Ran: true, Tail: tail.String()},
+			wkterr.New("WKT_POST_CREATE_INTERRUPTED", "the post-create script was interrupted").
+				WithPath(path).
+				WithDetail(tail.String()).
+				WithRemedy("the task was created and its tree is usable, but its setup did not finish",
+					"wkt post-create "+req.Task+" runs it again")
+	}
 	if err == nil {
 		return Result{Ran: true}, nil
 	}
@@ -190,8 +232,17 @@ func run(path string, req Request) (Result, error) {
 				WithRemedy("the task was created and its tree is usable, but its setup did not finish",
 					"wkt post-create "+req.Task+" runs it again, without a deadline")
 	}
+
+	// Work out what the script itself did, which is not always what cmd.Run
+	// returns. A child the script left running — a dev server, a watcher —
+	// inherits the output pipe, so Wait cannot finish and the WaitDelay
+	// backstop fires with ErrWaitDelay even though the script exited cleanly.
+	// Reporting that as a failure breaks every setup that starts a service.
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
+	switch {
+	case errors.As(err, &exit):
+	case errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil:
+	default:
 		// Never started: a missing interpreter, or a file that is executable
 		// but not runnable on this machine.
 		return Result{Ran: true}, wkterr.New("WKT_POST_CREATE_FAILED",
@@ -199,7 +250,11 @@ func run(path string, req Request) (Result, error) {
 			WithPath(path).WithFound(err.Error()).
 			WithRemedy("check that its interpreter exists and that the file is runnable here")
 	}
-	code := exit.ExitCode()
+
+	code := cmd.ProcessState.ExitCode()
+	if code == 0 {
+		return Result{Ran: true}, nil
+	}
 	return Result{Ran: true, ExitCode: code, Tail: tail.String()},
 		wkterr.New("WKT_POST_CREATE_FAILED", "the post-create script failed").
 			WithPath(path).

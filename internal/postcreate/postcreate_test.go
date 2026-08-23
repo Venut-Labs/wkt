@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -230,5 +231,81 @@ func TestZeroTimeoutMeansNoDeadline(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(tree, "finished")); statErr != nil {
 		t.Fatal("a run with no deadline must be allowed to finish")
+	}
+}
+
+// A setup script's ordinary last act is to leave something running — a dev
+// server, "docker compose up -d", a watcher. That child inherits the output
+// pipe, so Wait cannot finish and the WaitDelay backstop fires. The backstop
+// is right (otherwise wkt hangs on the dev server); reporting it as a failure
+// is not: the script exited 0.
+func TestABackgroundChildDoesNotTurnSuccessIntoFailure(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 0\n")
+	var out bytes.Buffer
+	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
+	if err != nil {
+		t.Fatalf("the script exited 0; wkt must not report a failure: %v", err)
+	}
+	if !res.Ran || res.ExitCode != 0 {
+		t.Fatalf("want a clean run, got %+v", res)
+	}
+}
+
+// And the backstop still has to do its job: wkt must not wait on a child the
+// script left running.
+func TestWktDoesNotWaitForWhatTheScriptLeftRunning(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 0\n")
+	var out bytes.Buffer
+	start := time.Now()
+	if _, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("wkt waited for the background child: %s", elapsed)
+	}
+}
+
+// A script that fails is still a failure, background child or not.
+func TestABackgroundChildDoesNotHideAFailure(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 4\n")
+	var out bytes.Buffer
+	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
+	if code := codeOf(t, err); code != "WKT_POST_CREATE_FAILED" {
+		t.Fatalf("want WKT_POST_CREATE_FAILED, got %q", code)
+	}
+	if res.ExitCode != 4 {
+		t.Fatalf("want exit 4, got %d", res.ExitCode)
+	}
+}
+
+// The script runs in its own process group, so the terminal's Ctrl-C never
+// reaches it — and wkt, dying instantly on the same signal, would never run
+// the deferred restore that puts the tree's back-fill links back. Both halves
+// matter: forward the signal, then end the run normally so the caller can
+// clean up on the way out.
+func TestAnInterruptReachesTheScriptAndEndsTheRun(t *testing.T) {
+	ws, tree := t.TempDir(), t.TempDir()
+	script(t, ws, "#!/bin/sh\ntrap 'echo caught > \"$WKT_TREE/caught\"; exit 130' INT\nsleep 30\n")
+	var out bytes.Buffer
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+	}()
+	start := time.Now()
+	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("the interrupt did not reach the script: %s", elapsed)
+	}
+	if code := codeOf(t, err); code != "WKT_POST_CREATE_INTERRUPTED" {
+		t.Fatalf("want WKT_POST_CREATE_INTERRUPTED, got %q (err %v)", code, err)
+	}
+	if !res.Ran {
+		t.Fatal("it did run; it was interrupted")
+	}
+	if _, statErr := os.Stat(filepath.Join(tree, "caught")); statErr != nil {
+		t.Fatal("the script never saw the signal")
 	}
 }
