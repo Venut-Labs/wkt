@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 — 2026-08-23
 
 The `post-create` seam: the last thing the design promised and had never
 built. §1.1 says "there is a `post-create` seam and a gitignored-file carry,
