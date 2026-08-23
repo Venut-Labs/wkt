@@ -239,10 +239,14 @@ func TestAddRefusesWhenTheEpochPredatesTheRepository(t *testing.T) {
 // identical sites is a defect that comes back.
 func TestAddWorktreeFailureCarriesGitsReason(t *testing.T) {
 	c, entries := fixture(t)
-	if _, err := Create(c, entries, "feat-addfilter", []string{"docs"}); err != nil {
-		t.Fatal(err)
-	}
 
+	// The filtered path is committed *before* the task exists. Add grafts a
+	// repository at the task's base epoch, and git commit timestamps are whole
+	// seconds: committing this afterwards meant the filter was inside the
+	// epoch only when both landed in the same second. On a loaded machine they
+	// did not, Add grafted the commit before .gitattributes, no filter ran,
+	// and the test failed — which is how it failed on CI while passing fifteen
+	// times in a row locally.
 	repo := filepath.Join(c.Workspace, "services", "svc-a")
 	if err := os.MkdirAll(filepath.Join(repo, "assets"), 0o755); err != nil {
 		t.Fatal(err)
@@ -255,6 +259,10 @@ func TestAddWorktreeFailureCarriesGitsReason(t *testing.T) {
 	}
 	g(t, repo, "add", "-A")
 	g(t, repo, "commit", "-qm", "track a filtered path")
+
+	if _, err := Create(c, entries, "feat-addfilter", []string{"docs"}); err != nil {
+		t.Fatal(err)
+	}
 
 	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
 	if err := os.WriteFile(globalCfg, []byte(

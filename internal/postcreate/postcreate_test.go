@@ -241,7 +241,7 @@ func TestZeroTimeoutMeansNoDeadline(t *testing.T) {
 // is not: the script exited 0.
 func TestABackgroundChildDoesNotTurnSuccessIntoFailure(t *testing.T) {
 	ws, tree := t.TempDir(), t.TempDir()
-	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 0\n")
+	script(t, ws, "#!/bin/sh\nsleep 8 &\nexit 0\n")
 	var out bytes.Buffer
 	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
 	if err != nil {
@@ -256,7 +256,7 @@ func TestABackgroundChildDoesNotTurnSuccessIntoFailure(t *testing.T) {
 // script left running.
 func TestWktDoesNotWaitForWhatTheScriptLeftRunning(t *testing.T) {
 	ws, tree := t.TempDir(), t.TempDir()
-	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 0\n")
+	script(t, ws, "#!/bin/sh\nsleep 8 &\nexit 0\n")
 	var out bytes.Buffer
 	start := time.Now()
 	if _, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out}); err != nil {
@@ -270,7 +270,7 @@ func TestWktDoesNotWaitForWhatTheScriptLeftRunning(t *testing.T) {
 // A script that fails is still a failure, background child or not.
 func TestABackgroundChildDoesNotHideAFailure(t *testing.T) {
 	ws, tree := t.TempDir(), t.TempDir()
-	script(t, ws, "#!/bin/sh\nsleep 60 &\nexit 4\n")
+	script(t, ws, "#!/bin/sh\nsleep 8 &\nexit 4\n")
 	var out bytes.Buffer
 	res, err := Run(Request{Workspace: ws, TreeRoot: tree, Task: "t", Out: &out})
 	if code := codeOf(t, err); code != "WKT_POST_CREATE_FAILED" {
