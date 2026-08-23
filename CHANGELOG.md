@@ -56,6 +56,12 @@ and nothing else" — the carry shipped in v0.5.0, and this is the other half.
   run at the tree root leaves a `node_modules` with a hundred thousand files;
   each would have become a permanent entry in the task's state. The tree half
   now collapses it the way git already collapses the repository half.
+- **A task with nothing to reach no longer carries an empty egress
+  allowlist.** `omitempty` does nothing on a struct field, so every task in a
+  workspace of local-only repositories rendered `"network": {}` — a present
+  but empty allowlist, which is the shape that made `git ls-remote origin`
+  fail with `CONNECT tunnel failed, response 403` and the opposite of what the
+  code claimed. Shipped in v0.4.2, found by review.
 - Internally: a per-task lock, so an install that runs for minutes no longer
   holds the container lock and stops every other command in the workspace.
 

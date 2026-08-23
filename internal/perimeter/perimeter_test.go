@@ -15,6 +15,18 @@ import (
 	"github.com/Venut-Labs/wkt/internal/wkterr"
 )
 
+// allowedDomains reads the egress allowlist out of a document. The Network
+// field is a pointer so that "omitempty" works, so absent and empty are the
+// same answer here and a different one in the rendered file: absent means the
+// document says nothing about egress, which is what a task with nothing to
+// reach must produce.
+func allowedDomains(d Document) []string {
+	if d.Sandbox.Network == nil {
+		return nil
+	}
+	return d.Sandbox.Network.AllowedDomains
+}
+
 func fixture(t *testing.T, siblings ...string) (container.C, state.Task, []string) {
 	t.Helper()
 	base := t.TempDir()
@@ -329,7 +341,7 @@ func TestOriginHostsAreReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(d.Sandbox.Network.AllowedDomains, ",")
+	got := strings.Join(allowedDomains(d), ",")
 	for _, want := range []string{"github.com", "gitlab.example.com"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a task must be able to reach %s; allowed: %q", want, got)
@@ -349,8 +361,8 @@ func TestNoOriginMeansNoNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Sandbox.Network.AllowedDomains) != 0 {
-		t.Fatalf("nothing to reach, so nothing should be opened: %v", d.Sandbox.Network.AllowedDomains)
+	if len(allowedDomains(d)) != 0 {
+		t.Fatalf("nothing to reach, so nothing should be opened: %v", allowedDomains(d))
 	}
 
 	setOrigin(t, filepath.Join(c.Workspace, "services", "svc-a"), filepath.Join(c.Workspace, "mirror.git"))
@@ -358,8 +370,8 @@ func TestNoOriginMeansNoNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Sandbox.Network.AllowedDomains) != 0 {
-		t.Fatalf("a local-path remote is not a host: %v", d.Sandbox.Network.AllowedDomains)
+	if len(allowedDomains(d)) != 0 {
+		t.Fatalf("a local-path remote is not a host: %v", allowedDomains(d))
 	}
 }
 
@@ -415,5 +427,32 @@ func run(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v in %s: %s", args, dir, out)
+	}
+}
+
+// A repository with no origin, or one whose remote is a local path, opens
+// nothing — which has to mean no network block at all, not an empty one.
+// "omitempty" does nothing on a struct field, so the document carried
+// "network": {} for every such task: a present but empty allowlist, which is
+// the shape that made "git ls-remote" fail with CONNECT 403 in the first
+// place. The field is a pointer so the tag can do what it says.
+func TestNoOriginMeansNoNetworkBlockAtAll(t *testing.T) {
+	c, tk, siblings := fixture(t)
+	doc, err := For(c, tk, siblings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe struct {
+		Sandbox map[string]json.RawMessage `json:"sandbox"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := probe.Sandbox["network"]; present {
+		t.Fatalf("a task that opens nothing must carry no network key; document was:\n%s", body)
 	}
 }

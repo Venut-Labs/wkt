@@ -65,7 +65,12 @@ type Permissions struct {
 type Sandbox struct {
 	Enabled    bool       `json:"enabled"`
 	Filesystem Filesystem `json:"filesystem"`
-	Network    Network    `json:"network,omitempty"`
+	// A pointer so that "omitempty" does what it says. On a struct field the
+	// tag does nothing, and every task in a workspace of local-only
+	// repositories carried "network": {} — a present but empty allowlist,
+	// which is the shape that made "git ls-remote origin" fail with CONNECT
+	// 403 and is the opposite of "opens nothing at all".
+	Network *Network `json:"network,omitempty"`
 }
 
 // Network is the egress allowlist. With the sandbox on, everything else is
@@ -166,9 +171,20 @@ func For(c container.C, t state.Task, siblings []string) (Document, error) {
 				AllowWrite: append(spellingsOf(c.StoreDir()), toolchainCaches()...),
 				DenyRead:   credentialDirs(),
 			},
-			Network: Network{AllowedDomains: originHosts(t)},
+			Network: networkFor(t),
 		},
 	}, nil
+}
+
+// networkFor is the egress allowlist, or nothing at all. A task whose
+// repositories point nowhere reachable gets no network key, so the document
+// says nothing about egress rather than saying "allow no host".
+func networkFor(t state.Task) *Network {
+	hosts := originHosts(t)
+	if len(hosts) == 0 {
+		return nil
+	}
+	return &Network{AllowedDomains: hosts}
 }
 
 // credentialDirs are read-denied outright: a task has no business reading the
