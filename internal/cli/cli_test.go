@@ -1993,3 +1993,37 @@ func TestNewNamesTheDirectoriesItCouldNotCover(t *testing.T) {
 		t.Fatal("the repository's own settings were overwritten in the tree")
 	}
 }
+
+// An SSH origin cannot be reached from inside a task tree at all — measured,
+// and not something wkt can fix, since the proxy is Claude Code's. Saying so
+// at creation is the difference between a puzzling failure later and a known
+// limit now.
+func TestNewWarnsAboutAnSSHOrigin(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "docs"))
+	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:example/docs.git")
+	cmd.Dir = filepath.Join(ws, "docs")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %s", out)
+	}
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "feat-ssh", "--repos", "docs", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("an SSH origin must not fail the task: %d %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "WKT_SSH_ORIGIN") {
+		t.Fatalf("the limit must be named; stderr was %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "docs") {
+		t.Fatalf("and the repository named; stderr was %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "wkt fetch") {
+		t.Fatalf("and the way work comes back; stderr was %q", errb.String())
+	}
+}

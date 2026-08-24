@@ -182,7 +182,12 @@ overwriting your configuration or refusing to build the task.
 - **No conflict prevention.** Two tasks editing one file still conflict; the
   conflict moves to the eventual rebase.
 - **No cross-repo atomic merge**, and **not a remote-side boundary** — a task
-  tree can push to the real origin.
+  tree can push to the real origin over HTTPS. An **SSH origin cannot be
+  reached from inside a tree at all**: Claude Code's sandbox routes SSH
+  through an HTTP proxy it cannot authenticate to, which no allowlist entry
+  changes. Work still comes back with `wkt fetch`, which runs outside the
+  sandbox, and pushes from your workspace as usual; `wkt new` warns when a
+  repository has one.
 - **No runtime environment**: ports, compose projects, databases and
   dependency installation are out of scope.
 - **A task over a repository with submodules cannot be removed** until the

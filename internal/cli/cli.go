@@ -310,6 +310,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		// Taken before the container lock is dropped, so nothing can slip in
 		// between and act on a task whose links are about to be withdrawn.
 		warnUncovered(c, t, stderr)
+		warnSSHOrigins(c, t, stderr)
 		taskLock, lockErr := container.LockTask(c, t.Name)
 		if lockErr != nil {
 			return fail(stderr, lockErr)
@@ -386,6 +387,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, loadErr)
 		}
 		warnUncovered(c, t, stderr)
+		warnSSHOrigins(c, t, stderr)
 		if err := runSeam(c, t, strings.Join(added, "\n"), stderr, 0); err != nil {
 			return fail(stderr, err)
 		}
@@ -976,6 +978,19 @@ func selection(entries []discover.Entry, repos string, all bool) []string {
 func warnUncovered(c container.C, t state.Task, stderr io.Writer) {
 	for _, dir := range perimeter.Skipped(c, t, t.PerimeterCoverage) {
 		fmt.Fprintf(stderr, "warning: WKT_PERIMETER_SKIPPED %s already has a settings file wkt did not write, so this directory has no wkt perimeter; move it aside and run wkt perimeter %s to cover it\n", dir, t.Name)
+	}
+}
+
+// warnSSHOrigins names repositories a task tree cannot reach.
+//
+// Measured: inside a covered tree, SSH is routed through Claude Code's proxy
+// and cannot authenticate to it, so a git@ origin is unreachable however the
+// allowlist is written. Work still comes back — wkt fetch runs out here, in
+// the developer's own shell — but an agent inside the tree cannot push, and
+// hearing that now beats discovering it mid-task.
+func warnSSHOrigins(c container.C, t state.Task, stderr io.Writer) {
+	for _, repo := range perimeter.SSHOrigins(t) {
+		fmt.Fprintf(stderr, "warning: WKT_SSH_ORIGIN %s has an SSH origin, which cannot be reached from inside a task tree: Claude Code's sandbox routes it through a proxy SSH cannot authenticate to. Work still comes back with wkt fetch %s, and pushes from the workspace as usual; an HTTPS origin would also work from inside the tree\n", repo, t.Name)
 	}
 }
 

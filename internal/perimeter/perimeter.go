@@ -310,6 +310,60 @@ func originHosts(t state.Task) []string {
 	return out
 }
 
+// SSHOrigins names the repositories whose origin is reached over SSH, which
+// is the one form a task tree cannot reach at all.
+//
+// Measured on Claude Code 2.1.239 inside a covered tree: "git ls-remote
+// git@github.com:..." fails with "This proxy requires authentication, and
+// this client did not offer an authentication method", while the same
+// repository over HTTPS succeeds and a host off the allowlist gets CONNECT
+// 403. The allowlist is an HTTP proxy; SSH is routed through it and cannot
+// authenticate to it, so no entry in allowedDomains helps and nothing wkt
+// writes can change it.
+//
+// This is not fatal to the design — work comes back through "wkt fetch",
+// which runs in the developer's own shell, outside any sandbox — but §0's
+// "a task tree can push to the repository's real origin" holds only for
+// HTTPS remotes, and someone should hear that from wkt rather than from a
+// puzzling failure later.
+func SSHOrigins(t state.Task) []string {
+	var out []string
+	for _, r := range t.Repos {
+		url, err := gitx.Run(r.AbsPath, "config", "--get", "remote.origin.url")
+		if err != nil {
+			continue
+		}
+		if isSSHRemote(strings.TrimSpace(url)) {
+			out = append(out, r.RelPath)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isSSHRemote reports whether a git remote is reached over SSH, in the two
+// spellings remotes come in: an explicit ssh:// scheme, and the scp-like
+// "[user@]host:path" form, which is what a forge hands people by default.
+func isSSHRemote(url string) bool {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return false
+	}
+	if strings.HasPrefix(url, "ssh://") {
+		return true
+	}
+	if i := strings.Index(url, "://"); i >= 0 {
+		return false // some other scheme, and it names itself
+	}
+	if strings.HasPrefix(url, "/") || strings.HasPrefix(url, ".") {
+		return false // a local path
+	}
+	// scp-like: the colon separates the path, and it comes before any slash.
+	colon := strings.Index(url, ":")
+	slash := strings.Index(url, "/")
+	return colon > 0 && (slash < 0 || colon < slash)
+}
+
 // hostFromRemoteURL pulls the host out of a git remote, in the spellings
 // remotes actually come in: https:// and ssh:// URLs, the scp-like
 // "git@host:path" form, and local paths — which have no host and must not

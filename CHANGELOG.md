@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`wkt new` and `wkt add` warn about an SSH origin.** Measured inside a
+  covered tree on Claude Code 2.1.239: `git ls-remote git@github.com:…` fails
+  with "This proxy requires authentication, and this client did not offer an
+  authentication method", while the same repository over HTTPS succeeds and a
+  host off the allowlist gets `CONNECT 403`. The sandbox routes SSH through
+  its HTTP proxy and SSH cannot authenticate to it, so no `allowedDomains`
+  entry helps and nothing wkt writes can change it — the proxy is Claude
+  Code's. Work still returns through `wkt fetch`, which runs outside the
+  sandbox, so this limits an agent pushing from inside the tree, not the
+  design. `WKT_SSH_ORIGIN` names the repository and the route back.
+
 ## v0.6.1 — 2026-08-24
 
 - **A repository with its own `.claude/settings.json` no longer blocks the

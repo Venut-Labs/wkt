@@ -456,3 +456,29 @@ func TestNoOriginMeansNoNetworkBlockAtAll(t *testing.T) {
 		t.Fatalf("a task that opens nothing must carry no network key; document was:\n%s", body)
 	}
 }
+
+// TestSSHOriginsNamesWhatCannotBeReachedFromInsideATree — measured on Claude
+// Code 2.1.239 inside a covered tree: "git ls-remote git@github.com:..."
+// fails with "This proxy requires authentication, and this client did not
+// offer an authentication method", while the same repository over HTTPS
+// succeeds and a host off the allowlist gets CONNECT 403. The allowlist is an
+// HTTP proxy; SSH is routed through it and cannot authenticate to it, so no
+// allowlist entry helps. Naming those repositories is all wkt can do.
+func TestSSHOriginsNamesWhatCannotBeReachedFromInsideATree(t *testing.T) {
+	for _, tc := range []struct {
+		url string
+		ssh bool
+	}{
+		{"git@github.com:Venut-Labs/wkt.git", true},
+		{"ssh://git@github.com/Venut-Labs/wkt.git", true},
+		{"https://github.com/Venut-Labs/wkt.git", false},
+		{"http://example.com/x.git", false},
+		{"/srv/mirrors/x.git", false},
+		{"file:///srv/mirrors/x.git", false},
+		{"", false},
+	} {
+		if got := isSSHRemote(tc.url); got != tc.ssh {
+			t.Fatalf("isSSHRemote(%q) = %v, want %v", tc.url, got, tc.ssh)
+		}
+	}
+}
