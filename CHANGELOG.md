@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.1 — 2026-08-24
 
 - **A repository with its own `.claude/settings.json` no longer blocks the
   task.** Measured: `wkt new` failed outright with `WKT_PERIMETER_FOREIGN` and
