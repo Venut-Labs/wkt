@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.2 — 2026-08-24
 
 - **`wkt new` and `wkt add` warn about an SSH origin.** Measured inside a
   covered tree on Claude Code 2.1.239: `git ls-remote git@github.com:…` fails
