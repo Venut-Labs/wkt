@@ -13,8 +13,13 @@ between repositories keep resolving. Repositories left out of the task are
 symlinked at their mirrored positions, so a partial selection still gives a
 complete tree.
 
-The workspace itself is never written to: task worktrees are cut from
-per-repository bare stores kept in a container beside the workspace.
+`wkt` never writes into the workspace itself: task worktrees are cut from
+per-repository bare stores kept in a container beside it. That is a promise
+about `wkt`, not about everything running in a tree — the repositories a task
+selected are isolated by git, and the ones it left out are reachable through
+those symlinks. A Claude Code session is kept out of them by the perimeter
+`wkt` writes; an editor, a `make` target or a plain shell is not. See
+[what it does not promise](#what-it-does-not-promise).
 
 ```
 ~/work/                        the workspace, a plain directory

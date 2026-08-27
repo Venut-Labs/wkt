@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1541,5 +1542,51 @@ func TestAProducedDirectoryDoesNotExemptWhatIsPutInItLater(t *testing.T) {
 	}
 	if !fileExempt {
 		t.Fatal("a produced file is still disposable; blocking on it brings --force back as a habit")
+	}
+}
+
+// TestForeignRepoNamesEveryOneAtOnce — the refusal found every foreign
+// repository and reported one, so clearing a tree meant moving one out,
+// retrying, and meeting the next. WKT_WOULD_LOSE_WORK already lists all its
+// blockers in problems[]; this is the same question with a different answer
+// shape for no reason (issue #5).
+func TestForeignRepoNamesEveryOneAtOnce(t *testing.T) {
+	c, entries := fixture(t)
+	tk, err := Create(c, entries, "feat-foreign", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := c.TreePath(tk.Name)
+	for _, name := range []string{"svc-new", "svc-other"} {
+		dir := filepath.Join(tree, "services", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("y\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		g(t, dir, "init", "-q")
+		g(t, dir, "add", "-A")
+		g(t, dir, "commit", "-qm", "own history")
+	}
+
+	_, err = Remove(c, "feat-foreign", true)
+	var e *wkterr.E
+	if !errors.As(err, &e) || e.Code != "WKT_FOREIGN_REPO" {
+		t.Fatalf("want WKT_FOREIGN_REPO, got %v", err)
+	}
+	if len(e.Problems) != 2 {
+		t.Fatalf("both repositories must be listed at once, got %d: %+v", len(e.Problems), e.Problems)
+	}
+	var seen []string
+	for _, p := range e.Problems {
+		if p.Info {
+			t.Fatalf("every one of them blocks: %+v", p)
+		}
+		seen = append(seen, filepath.Base(p.Path))
+	}
+	sort.Strings(seen)
+	if seen[0] != "svc-new" || seen[1] != "svc-other" {
+		t.Fatalf("want both named, got %v", seen)
 	}
 }

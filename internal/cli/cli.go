@@ -623,9 +623,21 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			names, _ := state.List(c.StateDir())
 			coverage, hashes, err := perimeter.Write(c, t, names)
 			if err != nil {
+				// Never a non-zero exit — aborting a session over a stale deny
+				// list would be a worse trade than running with one. But never
+				// silence either: this hook exists to close H16, and failing
+				// open without a word is the one thing the rest of the tool
+				// does not do. rm refuses and says why; this used to guess.
+				fmt.Fprintf(stderr, "warning: WKT_PERIMETER_STALE could not refresh the perimeter for task %s: %s\n", t.Name, err)
+				fmt.Fprintf(stderr, "         the deny list may not cover trees created since this one; run wkt perimeter %s\n", t.Name)
 				return 0
 			}
 			t.PerimeterCoverage, t.PerimeterHashes = coverage, hashes
+			// Skipped directories are reported here for the same reason they
+			// are at creation: partial coverage is fine, unannounced partial
+			// coverage is not. A settings file can appear after the task was
+			// made, so this is the only place that would notice.
+			warnUncovered(c, t, stderr)
 			_ = state.Save(c.StateDir(), t)
 			return 0
 		}

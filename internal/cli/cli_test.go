@@ -2027,3 +2027,100 @@ func TestNewWarnsAboutAnSSHOrigin(t *testing.T) {
 		t.Fatalf("and the way work comes back; stderr was %q", errb.String())
 	}
 }
+
+// sessionStartIn runs the hook with the tree as the working directory, which
+// is how Claude Code invokes it.
+func sessionStartIn(t *testing.T, tree, ws string) (string, string, int) {
+	t.Helper()
+	t.Chdir(tree)
+	var out, errb bytes.Buffer
+	stdin = strings.NewReader(`{"session_id":"s","cwd":"` + tree + `"}`)
+	defer func() { stdin = os.Stdin }()
+	code := Run([]string{"hook", "session-start", "--workspace", ws}, &out, &errb)
+	return out.String(), errb.String(), code
+}
+
+// The hook exists to close H16: a sibling tree created since WorktreeCreate
+// fired is not in this tree's deny list until something regenerates it. When
+// the regeneration fails, the session carries on with a stale perimeter —
+// missing exactly the sibling the hook was added to cover — and nothing said
+// so. The guard whose purpose is closing H16 failed open in silence.
+func TestSessionStartReportsAFailedPerimeterRefresh(t *testing.T) {
+	ws := seamWorkspace(t, "#!/bin/sh\ntrue\n")
+	var out, errb bytes.Buffer
+	if code := Run([]string{"new", "feat-ss", "--repos", "docs", "--no-post-create", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+
+	// Make the regeneration fail: the directory it must write into is
+	// read-only, so the temporary file cannot be created.
+	claudeDir := filepath.Join(tree, ".claude")
+	if err := os.Chmod(claudeDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(claudeDir, 0o755)
+
+	_, stderr, code := sessionStartIn(t, tree, ws)
+	if code != 0 {
+		t.Fatalf("aborting a session over this would be a poor trade; got exit %d", code)
+	}
+	if !strings.Contains(stderr, "WKT_PERIMETER_STALE") {
+		t.Fatalf("a failed refresh must be said out loud; stderr was %q", stderr)
+	}
+	if !strings.Contains(stderr, "feat-ss") {
+		t.Fatalf("and must name the task; stderr was %q", stderr)
+	}
+}
+
+// Since v0.6.1 a directory wkt does not own is skipped rather than failing the
+// write, so the hook has a second thing it can lose quietly — and the likelier
+// of the two. The session is exactly who needs to hear it: the repository it
+// is about to work in has no wkt perimeter.
+//
+// The gap has to pre-date the task. A directory wkt covered at creation stays
+// wkt's — checkOwned treats a recorded hash as ownership, and the generated
+// file says so itself: "edits are overwritten on the next regeneration".
+func TestSessionStartReportsASkippedDirectory(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	seedRepo(t, filepath.Join(ws, "docs"))
+	own := filepath.Join(ws, "docs", ".claude")
+	if err := os.MkdirAll(own, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(own, "settings.json"),
+		[]byte(`{"permissions":{"allow":["Bash(make *)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "own settings"}} {
+		full := append([]string{"-c", "user.email=e@x", "-c", "user.name=t"}, args...)
+		cmd := exec.Command("git", full...)
+		cmd.Dir = filepath.Join(ws, "docs")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("init exited %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"new", "feat-ss2", "--repos", "docs", "--workspace", ws}, &out, &errb); code != 0 {
+		t.Fatalf("new exited %d: %s", code, errb.String())
+	}
+	tree := strings.TrimSpace(out.String())
+
+	_, stderr, code := sessionStartIn(t, tree, ws)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(stderr, "WKT_PERIMETER_SKIPPED") {
+		t.Fatalf("a skipped directory must be said out loud here too; stderr was %q", stderr)
+	}
+	if !strings.Contains(stderr, "docs") {
+		t.Fatalf("and named; stderr was %q", stderr)
+	}
+}

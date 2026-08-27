@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **`wkt hook session-start` no longer fails open in silence** (issue #6). The
+  hook exists to close H16 — a sibling tree created since `WorktreeCreate`
+  fired is not in this tree's deny list until something regenerates it — and
+  when the regeneration failed it returned 0 with nothing on stderr, so the
+  session carried on with a stale perimeter missing exactly the sibling the
+  hook was added to cover. It now says `WKT_PERIMETER_STALE` and names the
+  task. It also reports `WKT_PERIMETER_SKIPPED` for a directory wkt does not
+  own, which since v0.6.1 is the likelier of the two things it could lose. The
+  exit stays 0: aborting a session over a stale deny list would be the worse
+  trade.
+- **A forced removal names every foreign repository at once** (issue #5). All
+  of them were found and one was reported, so clearing a tree meant moving one
+  out, retrying, and meeting the next. They now arrive together in
+  `problems[]`, the shape `WKT_WOULD_LOSE_WORK` already used.
+- **The README no longer promises more than wkt delivers** (issue #4). "The
+  workspace itself is never written to" is true of wkt's own writes and was
+  read as a guarantee about everything running in a tree — three lines after
+  the sentence introducing the back-fill symlinks. It now says which half is
+  guaranteed and by whom.
+
 ## v0.6.2 — 2026-08-24
 
 - **`wkt new` and `wkt add` warn about an SSH origin.** Measured inside a

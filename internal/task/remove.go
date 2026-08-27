@@ -504,18 +504,35 @@ func Remove(c container.C, name string, force bool) ([]Kept, error) {
 			blocking = append(blocking, b)
 		}
 	}
+	// Every foreign repository at once, not the first of them. They are all
+	// found already; reporting one meant moving it out, retrying, and meeting
+	// the next — once per repository (issue #5). WKT_WOULD_LOSE_WORK below
+	// answers the same kind of question with problems[], and there was no
+	// reason for these two to differ.
+	var foreign []Blocker
 	for _, b := range blocking {
 		if b.Code == "WKT_FOREIGN_REPO" {
-			// Unconditional, --force included: a repository created inside the
-			// tree has no store behind it, so its history exists nowhere else
-			// and nothing can bring it back (spec §5.7, issue #1). This is the
-			// one refusal --force does not cover, which is what keeps --force
-			// safe to reach for at all.
-			return nil, wkterr.New(b.Code, "a repository wkt did not create lives inside the tree").
-				WithPath(b.Path).
-				WithRemedy("move it out of the tree, or push it somewhere first",
-					"then retry the removal")
+			foreign = append(foreign, b)
 		}
+	}
+	if len(foreign) > 0 {
+		// Unconditional, --force included: a repository created inside the
+		// tree has no store behind it, so its history exists nowhere else
+		// and nothing can bring it back (spec §5.7, issue #1). This is the
+		// one refusal --force does not cover, which is what keeps --force
+		// safe to reach for at all.
+		e := wkterr.New("WKT_FOREIGN_REPO", "a repository wkt did not create lives inside the tree")
+		if len(foreign) > 1 {
+			e = wkterr.New("WKT_FOREIGN_REPO", "repositories wkt did not create live inside the tree")
+		}
+		for _, b := range foreign {
+			e = e.WithProblem(wkterr.Problem{Code: b.Code, Repo: b.Repo, Path: b.Path})
+		}
+		return nil, e.WithPath(foreign[0].Path).
+			WithRemedy("move them out of the tree, or push them somewhere first",
+				"then retry the removal")
+	}
+	for _, b := range blocking {
 		if b.Code == "WKT_SUBMODULE" && force {
 			return nil, wkterr.New(b.Code, "a submodule is present; --force would destroy its objects").
 				WithRepo(b.Repo).WithRemedy("push the submodule's commits", "git submodule deinit", "then retry")
